@@ -30,19 +30,27 @@ extraction (Lorentzian + β-separation), and MZI FSR self-calibration.
 ```
 dbpd_analyzer/
 ├── README.md
+├── LICENSE                  MIT (this project) + third-party notice
 ├── requirements.txt
 ├── main.py                  Entry point — Fusion style + global QSS + MainWindow
-└── app/
-    ├── __init__.py
-    ├── styles.py            Apple-light QSS
-    ├── data_io.py           CSV load / array load / save
-    ├── mzi_calibrate.py     FSR auto-calibration (Hilbert + Welch + dip search)
-    ├── analysis.py          Lorentz floor fit + β-separation integration
-    ├── scope.py             AcquireWorker (QThread) around SDS7404 driver
-    ├── processor.py         CoshXcorr wrapper + ProcessWorker + CalibrateWorker
-    ├── plot_widget.py       matplotlib FigureCanvas + analysis overlays
-    ├── settings_panel.py    Sidebar: data / optical / segments / display / analysis
-    └── main_window.py       Wires sidebar ↔ plot ↔ workers
+├── app/
+│   ├── __init__.py
+│   ├── styles.py            Apple-light QSS
+│   ├── data_io.py           CSV load / array load / save
+│   ├── mzi_calibrate.py     FSR auto-calibration (Hilbert + Welch + dip search)
+│   ├── analysis.py          Lorentz floor fit + β-separation integration
+│   ├── scope.py             AcquireWorker (QThread) around SDS7404 driver
+│   ├── processor.py         CoshXcorr wrapper + ProcessWorker + CalibrateWorker
+│   ├── plot_widget.py       matplotlib FigureCanvas + analysis overlays
+│   ├── settings_panel.py    Sidebar: data / optical / segments / display / analysis
+│   └── main_window.py       Wires sidebar ↔ plot ↔ workers
+├── vendor/                  Vendored third-party dependencies (see vendor/README.md)
+│   ├── pycosh/              MIT, Maodong Gao 2022 — COSH reference implementation
+│   └── sds7404/             Siglent SDS7404A LAN driver
+└── examples/
+    ├── sample_data.csv      ~4 MB, 100k samples × 250 MSa/s × 3 columns
+    ├── make_sample_data.py  Regenerate from a longer source CSV
+    └── README.md            How to load + recommended BW_SEGMENT for this sample
 ```
 
 ---
@@ -50,20 +58,46 @@ dbpd_analyzer/
 ## Setup
 
 ```bash
+git clone <repo-url>
 cd dbpd_analyzer
 python -m venv .venv
 .venv/bin/pip install -r requirements.txt
 ```
 
-External code references (set in source if your paths differ):
-- pycosh: `/Users/x/python/pic-workspace/projects/LaserPhaseNoise/` (see `app/processor.py::DEFAULT_PYCOSH_PARENT`)
-- SDS7404 driver: `/Users/x/python/sds7404/` (see `app/scope.py::DEFAULT_SDS7404_PARENT`)
+That's it — `pycosh` and the `sds7404` driver are bundled under `vendor/`,
+so no extra paths or external repos to clone. The app adds `vendor/` to
+`sys.path` at import time.
+
+### Power-user overrides
+
+If you want to point at an external development checkout of either
+dependency (e.g. to track upstream pycosh), set:
+
+```bash
+export DBPD_PYCOSH_PARENT=/path/to/folder-containing-pycosh
+export DBPD_SDS7404_PARENT=/path/to/folder-containing-sds7404
+```
+
+The override takes effect after the bundled `vendor/` copy fails to import,
+not before, so a clean clone always works out of the box.
 
 ## Run
 
 ```bash
 .venv/bin/python main.py            # macOS / Linux
 .venv\Scripts\python.exe main.py    # Windows
+```
+
+## Try the sample dataset
+
+```bash
+# After running the GUI:
+# 1. sidebar mode → "Single CSV (3 columns: t, BPD1, BPD2)"
+# 2. Browse → examples/sample_data.csv
+# 3. Segments → change Bandwidth bins to:  10, 30, 100, 300, 1000, 3000, 10000
+#    (the bundled sample is only 400 µs long, so the default 1-kHz bin
+#     won't fit — see examples/README.md)
+# 4. ▶ Process
 ```
 
 ---
@@ -256,4 +290,8 @@ in the sister repo for the test.
 
 ## License
 
-TBD.
+MIT — see [LICENSE](LICENSE).
+
+Bundled vendored components keep their own licensing:
+- `vendor/pycosh/`  MIT, Copyright (c) 2022 Maodong Gao
+- `vendor/sds7404/`  MIT (this project)

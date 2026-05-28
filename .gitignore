@@ -46,6 +46,9 @@ desktop.ini
 data/
 captures/
 
+# …but the committed demo CSV is an exception
+!examples/sample_data.csv
+
 # Plots / images / screenshots
 *.png
 *.jpg

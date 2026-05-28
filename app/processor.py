@@ -8,21 +8,34 @@ from pathlib import Path
 import numpy as np
 from PySide6.QtCore import QObject, QThread, Signal
 
-# Default: import pycosh from the user's pic-workspace install
-DEFAULT_PYCOSH_PARENT = Path(
-    "/Users/x/python/pic-workspace/projects/LaserPhaseNoise"
-)
+# Lookup order: already-on-sys.path → vendor/ → optional external override
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+VENDOR_PYCOSH_PARENT = _REPO_ROOT / "vendor"
+EXTERNAL_PYCOSH_PARENT_ENV = "DBPD_PYCOSH_PARENT"
 
 
-def ensure_pycosh_importable(parent: Path = DEFAULT_PYCOSH_PARENT) -> None:
-    """Add pycosh's parent directory to sys.path if not already importable."""
+def ensure_pycosh_importable() -> None:
+    """Make `pycosh` importable. Prefers the vendored copy under vendor/;
+    falls back to $DBPD_PYCOSH_PARENT if set, for power users who want to
+    point at a development checkout of upstream pycosh."""
     try:
         import pycosh  # noqa: F401
         return
     except ImportError:
         pass
-    if parent.exists():
-        sys.path.insert(0, str(parent))
+
+    import os
+    candidates: list[Path] = []
+    if VENDOR_PYCOSH_PARENT.exists():
+        candidates.append(VENDOR_PYCOSH_PARENT)
+    override = os.environ.get(EXTERNAL_PYCOSH_PARENT_ENV)
+    if override:
+        candidates.append(Path(override))
+
+    for parent in candidates:
+        if (parent / "pycosh").exists():
+            sys.path.insert(0, str(parent))
+            return
 
 
 @dataclass(frozen=True)

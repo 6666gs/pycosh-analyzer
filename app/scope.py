@@ -7,19 +7,33 @@ from pathlib import Path
 import numpy as np
 from PySide6.QtCore import QObject, QThread, Signal
 
-# Default: import sds7404 driver from the user's sds7404 install
-DEFAULT_SDS7404_PARENT = Path("/Users/x/python/sds7404")
+# Lookup order: already-on-sys.path → vendor/ → optional external override
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+VENDOR_SDS7404_PARENT = _REPO_ROOT / "vendor"
+EXTERNAL_SDS7404_PARENT_ENV = "DBPD_SDS7404_PARENT"
 
 
-def ensure_sds7404_importable(parent: Path = DEFAULT_SDS7404_PARENT) -> None:
-    """Add the sds7404 driver's parent dir to sys.path if needed."""
+def ensure_sds7404_importable() -> None:
+    """Make `sds7404` importable. Prefers the vendored driver under vendor/;
+    falls back to $DBPD_SDS7404_PARENT if set."""
     try:
         import sds7404  # noqa: F401
         return
     except ImportError:
         pass
-    if parent.exists():
-        sys.path.insert(0, str(parent))
+
+    import os
+    candidates: list[Path] = []
+    if VENDOR_SDS7404_PARENT.exists():
+        candidates.append(VENDOR_SDS7404_PARENT)
+    override = os.environ.get(EXTERNAL_SDS7404_PARENT_ENV)
+    if override:
+        candidates.append(Path(override))
+
+    for parent in candidates:
+        if (parent / "sds7404").exists():
+            sys.path.insert(0, str(parent))
+            return
 
 
 class AcquireWorker(QThread):

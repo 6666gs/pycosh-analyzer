@@ -1,0 +1,63 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+build/
+dist/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual env
+.venv/
+venv/
+env/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.spyproject/
+.pyre/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Data / measurement output — don't commit acquired waveforms or
+# exported spectra; this is a code repo only
+*.csv
+*.npy
+*.npz
+*.h5
+*.mat
+*.parquet
+data/
+captures/
+
+# Plots / images / screenshots
+*.png
+*.jpg
+*.jpeg
+*.pdf
+*.svg
+screenshots/
+
+# Logs
+*.log
+
+# Local config overrides
+.env
+.env.local
+local_config.py

@@ -1,0 +1,164 @@
+"""Background worker that runs pycosh's CoshXcorr without blocking the UI."""
+from __future__ import annotations
+
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+
+import numpy as np
+from PySide6.QtCore import QObject, QThread, Signal
+
+# Default: import pycosh from the user's pic-workspace install
+DEFAULT_PYCOSH_PARENT = Path(
+    "/Users/x/python/pic-workspace/projects/LaserPhaseNoise"
+)
+
+
+def ensure_pycosh_importable(parent: Path = DEFAULT_PYCOSH_PARENT) -> None:
+    """Add pycosh's parent directory to sys.path if not already importable."""
+    try:
+        import pycosh  # noqa: F401
+        return
+    except ImportError:
+        pass
+    if parent.exists():
+        sys.path.insert(0, str(parent))
+
+
+@dataclass(frozen=True)
+class ProcessRequest:
+    v1: np.ndarray
+    v2: np.ndarray | None        # None -> autocorrelation only
+    sample_rate: float
+    delay_freq: float            # FSR in Hz
+    bw_segment: tuple[float, ...]
+    offset_start_ratio: int
+    range_start: int | None
+    range_stop: int | None
+
+
+@dataclass(frozen=True)
+class ProcessResult:
+    freq: np.ndarray
+    gfilter: np.ndarray
+    psd11: np.ndarray
+    psd11_err: np.ndarray
+    psd22: np.ndarray
+    psd22_err: np.ndarray
+    psd12: np.ndarray
+    psd12_err: np.ndarray
+    request: ProcessRequest
+
+    # Derived spectra (G(f) compensated)
+    @property
+    def s_nu_11(self) -> np.ndarray:
+        return np.abs(self.psd11) / self.gfilter
+
+    @property
+    def s_nu_22(self) -> np.ndarray:
+        return np.abs(self.psd22) / self.gfilter
+
+    @property
+    def s_nu_12(self) -> np.ndarray:
+        return np.abs(self.psd12) / self.gfilter
+
+    @property
+    def s_nu_12_err(self) -> np.ndarray:
+        return np.abs(self.psd12_err) / self.gfilter
+
+    @property
+    def s_phi_11(self) -> np.ndarray:
+        return self.s_nu_11 / self.freq**2
+
+    @property
+    def s_phi_22(self) -> np.ndarray:
+        return self.s_nu_22 / self.freq**2
+
+    @property
+    def s_phi_12(self) -> np.ndarray:
+        return self.s_nu_12 / self.freq**2
+
+    @property
+    def s_phi_12_err(self) -> np.ndarray:
+        return self.s_nu_12_err / self.freq**2
+
+
+class ProcessWorker(QThread):
+    """Runs CoshXcorr.process() off the main thread."""
+    progress = Signal(str)
+    finished_ok = Signal(object)     # ProcessResult
+    finished_err = Signal(str)
+
+    def __init__(self, request: ProcessRequest, parent: QObject | None = None):
+        super().__init__(parent)
+        self._req = request
+
+    def run(self) -> None:
+        try:
+            ensure_pycosh_importable()
+            from pycosh import CoshConfig, CoshXcorr  # type: ignore
+
+            req = self._req
+            self.progress.emit("Configuring pycosh …")
+            cfg = CoshConfig(
+                delay_freq=req.delay_freq,
+                bw_segment=list(req.bw_segment),
+                sample_rate=req.sample_rate,
+                offset_start_ratio=req.offset_start_ratio,
+                range_start=req.range_start,
+                range_stop=req.range_stop,
+            )
+            trace2 = req.v2 if req.v2 is not None else req.v1
+            cosh = CoshXcorr(trace1=req.v1, trace2=trace2, config=cfg)
+            self.progress.emit("Running Hilbert + multi-band FFT …")
+            cosh.process(print_progress=False)
+            result = ProcessResult(
+                freq=np.asarray(cosh.freq_list),
+                gfilter=np.asarray(cosh.freq_filter),
+                psd11=np.asarray(cosh.psd11),
+                psd11_err=np.asarray(cosh.psd11_err),
+                psd22=np.asarray(cosh.psd22),
+                psd22_err=np.asarray(cosh.psd22_err),
+                psd12=np.asarray(cosh.psd12),
+                psd12_err=np.asarray(cosh.psd12_err),
+                request=req,
+            )
+            self.finished_ok.emit(result)
+        except Exception as exc:  # noqa: BLE001
+            self.finished_err.emit(f"{type(exc).__name__}: {exc}")
+
+
+class CalibrateWorker(QThread):
+    """Runs MZI FSR calibration off the main thread."""
+    finished_ok = Signal(object)     # MziResult
+    finished_err = Signal(str)
+
+    def __init__(
+        self,
+        v: np.ndarray,
+        sample_rate: float,
+        n_core: float,
+        nperseg: int = 131_072,
+        search_lo: float = 5e5,
+        search_hi: float | None = None,
+        parent: QObject | None = None,
+    ):
+        super().__init__(parent)
+        self.v = v
+        self.sample_rate = sample_rate
+        self.n_core = n_core
+        self.nperseg = nperseg
+        self.search_lo = search_lo
+        self.search_hi = search_hi
+
+    def run(self) -> None:
+        try:
+            from .mzi_calibrate import calibrate_mzi
+            res = calibrate_mzi(
+                self.v, self.sample_rate, n_core=self.n_core,
+                nperseg=self.nperseg,
+                search_lo=self.search_lo, search_hi=self.search_hi,
+            )
+            self.finished_ok.emit(res)
+        except Exception as exc:  # noqa: BLE001
+            self.finished_err.emit(f"{type(exc).__name__}: {exc}")

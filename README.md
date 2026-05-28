@@ -1,5 +1,7 @@
 # dbpd_analyzer
 
+**English** | [简体中文](README.zh-CN.md)
+
 Desktop UI for **dual-BPD correlated self-heterodyne (COSH)** laser
 frequency-noise analysis. PySide6 + matplotlib + the
 [pycosh](https://github.com/) reference implementation from Yuan et al.

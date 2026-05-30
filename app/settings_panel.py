@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum, auto
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
@@ -86,11 +87,11 @@ class SettingsSnapshot:
     scope_ch1: str
     scope_ch2: str | None
     scope_send_single: bool
-    # Optical
-    delay_length_m: float
+    # Optical — delay_length_m / delay_freq_hz are None until auto-calibration
+    delay_length_m: float | None
     n_core: float
     aom_freq_mhz: float
-    delay_freq_hz: float
+    delay_freq_hz: float | None
     # Segments
     bw_segment_hz: tuple[float, ...]
     offset_start_ratio: int
@@ -282,7 +283,30 @@ class DataSection(QFrame):
 
 # ---------- Optical section ----------
 
+class _FsrState(Enum):
+    IDLE = auto()         # no data loaded yet — Process locked
+    CALIBRATING = auto()  # auto-cal worker in flight
+    CALIBRATED = auto()   # got a clean FSR — Process unlocked
+    FAILED = auto()       # cal ran but found no usable zero
+
+
+# Label text for every non-CALIBRATED state. CALIBRATED writes a derived
+# string in `_refresh_display`, so it isn't listed here.
+_FSR_STATE_TEXTS: dict[_FsrState, tuple[str, str]] = {
+    _FsrState.IDLE:        ("FSR: not calibrated (load data first)", "Fiber length: —"),
+    _FsrState.CALIBRATING: ("Calibrating FSR from data …",           "Fiber length: —"),
+    _FsrState.FAILED:      ("FSR: auto-calibration failed",           "Fiber length: —"),
+}
+
+
 class OpticalSection(QFrame):
+    """Optical path. FSR is auto-detected from the loaded data — the
+    user only sets n_core (refractive index) and the AOM carrier; the
+    fiber length is derived from FSR and shown for human reference.
+
+    Calibration runs through an explicit 4-state machine (`_FsrState`)
+    so the label text and Re-calibrate-button enablement live in a
+    single place (`_apply_state`)."""
     calibrateRequested = Signal()
     fsrChanged = Signal()
 
@@ -290,69 +314,113 @@ class OpticalSection(QFrame):
         super().__init__(parent)
         self.setObjectName("sectionCard")
 
-        self.delay_len = QDoubleSpinBox()
-        self.delay_len.setRange(0.001, 100_000.0)
-        self.delay_len.setDecimals(4)
-        self.delay_len.setSuffix(" m")
-        self.delay_len.setValue(10.0)
-        self.delay_len.valueChanged.connect(self._update_fsr)
+        self._fsr_hz: float | None = None
+        self._state: _FsrState = _FsrState.IDLE
 
         self.n_core = QDoubleSpinBox()
         self.n_core.setRange(1.0, 2.0)
         self.n_core.setDecimals(4)
         self.n_core.setSingleStep(0.001)
         self.n_core.setValue(1.468)
-        self.n_core.valueChanged.connect(self._update_fsr)
+        self.n_core.valueChanged.connect(self._refresh_display)
 
         self.aom_freq = QDoubleSpinBox()
         self.aom_freq.setRange(0.0, 5_000.0)
         self.aom_freq.setSuffix(" MHz")
         self.aom_freq.setDecimals(3)
-        self.aom_freq.setValue(55.0)
+        self.aom_freq.setValue(80.0)
 
-        self.fsr_display = _metric("— MHz")
-        self.calibrate_btn = _secondary_btn("Auto-calibrate FSR from data")
+        self.fsr_display = _metric(_FSR_STATE_TEXTS[_FsrState.IDLE][0])
+        self.delay_len_display = _metric(_FSR_STATE_TEXTS[_FsrState.IDLE][1])
+
+        self.calibrate_btn = _secondary_btn("Re-calibrate FSR")
+        self.calibrate_btn.setEnabled(False)
         self.calibrate_btn.clicked.connect(self.calibrateRequested.emit)
 
-        form = QFormLayout()
-        form.setSpacing(8)
-        form.setContentsMargins(0, 0, 0, 0)
-        form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
-        form.addRow("Fiber delay length", self.delay_len)
-        form.addRow("Core index n", self.n_core)
-        form.addRow("AOM carrier", self.aom_freq)
-        form.addRow("Computed FSR", self.fsr_display)
+        # n_core + AOM share one row to save vertical space
+        editable_row = QHBoxLayout()
+        editable_row.setSpacing(6)
+        nlbl = QLabel("n")
+        nlbl.setMinimumWidth(14)
+        editable_row.addWidget(nlbl)
+        editable_row.addWidget(self.n_core, 1)
+        editable_row.addSpacing(8)
+        editable_row.addWidget(QLabel("AOM"))
+        editable_row.addWidget(self.aom_freq, 1)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(10)
-        layout.addLayout(form)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(6)
+        layout.addLayout(editable_row)
+        layout.addWidget(self.fsr_display)
+        layout.addWidget(self.delay_len_display)
         layout.addWidget(self.calibrate_btn)
-        layout.addWidget(_hint(
-            "FSR = c / (n · ΔL). Use auto-calibrate to read it back from a "
-            "real beat trace (single BPD), more accurate than the catalogue "
-            "fiber length."
-        ))
 
-        self._update_fsr()
+    # ---- state ----
+    @property
+    def is_calibrated(self) -> bool:
+        return self._state == _FsrState.CALIBRATED
 
     @property
-    def delay_freq_hz(self) -> float:
-        tau = self.n_core.value() * self.delay_len.value() / C_LIGHT
-        return 1.0 / tau
+    def delay_freq_hz(self) -> float | None:
+        return self._fsr_hz
+
+    @property
+    def delay_length_m(self) -> float | None:
+        if self._fsr_hz is None:
+            return None
+        return C_LIGHT / (self.n_core.value() * self._fsr_hz)
+
+    # ---- transitions driven by MainWindow ----
+    def set_calibrating(self) -> None:
+        self._apply_state(_FsrState.CALIBRATING)
 
     def apply_calibrated_fsr(self, fsr_hz: float) -> None:
-        new_len = C_LIGHT / (self.n_core.value() * fsr_hz)
-        self.delay_len.blockSignals(True)
-        self.delay_len.setValue(new_len)
-        self.delay_len.blockSignals(False)
-        self._update_fsr()
+        self._fsr_hz = fsr_hz
+        self._apply_state(_FsrState.CALIBRATED)
 
-    def _update_fsr(self) -> None:
-        fsr_mhz = self.delay_freq_hz / 1e6
-        tau_ns = 1.0 / self.delay_freq_hz * 1e9
-        self.fsr_display.setText(f"{fsr_mhz:.4f} MHz  (τ = {tau_ns:.2f} ns)")
+    def calibration_failed(self) -> None:
+        """Called when auto-cal couldn't find a clean FSR zero."""
+        self._fsr_hz = None
+        self._apply_state(_FsrState.FAILED)
+
+    def reset_calibration(self) -> None:
+        """Called when the loaded data changes — invalidate the old FSR."""
+        self._fsr_hz = None
+        self._apply_state(_FsrState.IDLE)
+
+    # ---- internal ----
+    def _apply_state(self, state: _FsrState) -> None:
+        """Single source of truth for label text + button-enabled. Every
+        state transition goes through here so the four states can't
+        desync."""
+        self._state = state
+        if state == _FsrState.CALIBRATED:
+            self._refresh_display()
+            self.calibrate_btn.setEnabled(True)
+        else:
+            text_fsr, text_len = _FSR_STATE_TEXTS[state]
+            self.fsr_display.setText(text_fsr)
+            self.delay_len_display.setText(text_len)
+            # Allow retry after a real failure; lock during cal / when idle.
+            self.calibrate_btn.setEnabled(state == _FsrState.FAILED)
         self.fsrChanged.emit()
+
+    def _refresh_display(self) -> None:
+        """Refresh the FSR / fiber-length text. Called by `_apply_state`
+        on transition to CALIBRATED, and by `n_core.valueChanged` when
+        the user edits the refractive index after calibration."""
+        if self._fsr_hz is None:
+            return
+        fsr_mhz = self._fsr_hz / 1e6
+        tau_ns = 1e9 / self._fsr_hz
+        # Read through the property so the C_LIGHT/(n·fsr) compute lives
+        # in one place.
+        delay_m = self.delay_length_m
+        self.fsr_display.setText(
+            f"FSR  {fsr_mhz:.4f} MHz   (τ = {tau_ns:.2f} ns)"
+        )
+        self.delay_len_display.setText(f"Fiber  {delay_m:.4f} m")
 
 
 # ---------- Segment section ----------
@@ -375,29 +443,27 @@ class SegmentSection(QFrame):
         self.range_stop.setPlaceholderText("auto")
 
         form = QFormLayout()
-        form.setSpacing(8)
+        form.setSpacing(6)
         form.setContentsMargins(0, 0, 0, 0)
-        form.addRow("Bandwidth bins (kHz)", self.bw_edit)
-        form.addRow("Offset start × bw", self.ratio)
+        form.addRow("BW bins (kHz)", self.bw_edit)
 
-        range_row = QHBoxLayout()
-        range_row.setSpacing(6)
-        range_row.addWidget(self.range_start)
+        ratio_range_row = QHBoxLayout()
+        ratio_range_row.setSpacing(6)
+        ratio_range_row.addWidget(QLabel("ratio"))
+        ratio_range_row.addWidget(self.ratio)
+        ratio_range_row.addSpacing(8)
+        ratio_range_row.addWidget(QLabel("range"))
+        ratio_range_row.addWidget(self.range_start)
         sep = QLabel("→")
         sep.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        range_row.addWidget(sep)
-        range_row.addWidget(self.range_stop)
-        form.addRow("Sample index range", range_row)
+        ratio_range_row.addWidget(sep)
+        ratio_range_row.addWidget(self.range_stop)
+        form.addRow("", ratio_range_row)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(10)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(6)
         layout.addLayout(form)
-        layout.addWidget(_hint(
-            "Minimum analyzed frequency = bw_segment[0] × ratio. "
-            "Smaller bw[0] reaches lower offsets but needs longer records "
-            "(per-segment length = 1 / (bw · dt))."
-        ))
 
     def parsed_bw_hz(self) -> tuple[float, ...]:
         raw = self.bw_edit.text().replace(";", ",")
@@ -441,16 +507,31 @@ class DisplaySection(QFrame):
                   self.c_cross, self.c_errband):
             w.toggled.connect(self.optionsChanged.emit)
 
+        # Compact: 2 radio buttons on one row, 4 checkboxes on a 2×2 grid
+        radio_row = QHBoxLayout()
+        radio_row.setSpacing(12)
+        radio_row.addWidget(self.r_freq)
+        radio_row.addWidget(self.r_phase)
+        radio_row.addStretch(1)
+
+        chk_row1 = QHBoxLayout()
+        chk_row1.setSpacing(12)
+        chk_row1.addWidget(self.c_bpd1)
+        chk_row1.addWidget(self.c_bpd2)
+        chk_row1.addStretch(1)
+
+        chk_row2 = QHBoxLayout()
+        chk_row2.setSpacing(12)
+        chk_row2.addWidget(self.c_cross)
+        chk_row2.addWidget(self.c_errband)
+        chk_row2.addStretch(1)
+
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setContentsMargins(12, 10, 12, 10)
         layout.setSpacing(6)
-        layout.addWidget(self.r_freq)
-        layout.addWidget(self.r_phase)
-        layout.addSpacing(6)
-        layout.addWidget(self.c_bpd1)
-        layout.addWidget(self.c_bpd2)
-        layout.addWidget(self.c_cross)
-        layout.addWidget(self.c_errband)
+        layout.addLayout(radio_row)
+        layout.addLayout(chk_row1)
+        layout.addLayout(chk_row2)
 
 
 # ---------- Analysis section (Lorentz floor + β-separation) ----------
@@ -510,21 +591,19 @@ class AnalysisSection(QFrame):
         bt_row.addWidget(self.beta_fmax)
         form.addRow("β integration (Hz)", DataSection._row_widget(bt_row))
 
+        toggles_row = QHBoxLayout()
+        toggles_row.setSpacing(12)
+        toggles_row.addWidget(self.c_show_beta)
+        toggles_row.addWidget(self.c_show_lorentz)
+        toggles_row.addStretch(1)
+
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(8)
-        layout.addWidget(self.c_show_beta)
-        layout.addWidget(self.c_show_lorentz)
-        layout.addSpacing(4)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(6)
+        layout.addLayout(toggles_row)
         layout.addLayout(form)
-        layout.addSpacing(4)
         layout.addWidget(self.lorentz_display)
         layout.addWidget(self.beta_display)
-        layout.addWidget(_hint(
-            "Lorentz FWHM = π · S₀; floor read from median of Sν in the "
-            "fit range. β-separation (Di Domenico 2010): area above the "
-            "line 8ln2/π² · f gives the Gaussian FWHM via √(8ln2 · A)."
-        ))
 
     def update_results(self, lorentz_text: str, beta_text: str) -> None:
         self.lorentz_display.setText(lorentz_text)
@@ -579,6 +658,12 @@ class SettingsPanel(QWidget):
             "QPushButton:pressed  { background-color: #0055B3; }"
             "QPushButton:disabled { background-color: #C7C7CC; color: white; }"
         )
+        # The Process button is gated by two independent flags below:
+        # _busy (a process run is already in flight) and _calibrated (we
+        # have a usable FSR). They're composed in `_refresh_process_btn`.
+        self._busy: bool = False
+        self._calibrated: bool = False
+        self.process_btn.setEnabled(False)
 
         self.export_btn = _secondary_btn("Export spectrum…")
         self.export_btn.setEnabled(False)
@@ -593,11 +678,12 @@ class SettingsPanel(QWidget):
         self.process_btn.clicked.connect(self.processRequested.emit)
         self.export_btn.clicked.connect(self.exportRequested.emit)
 
-        scroll_inner = QWidget()
-        inner_layout = QVBoxLayout(scroll_inner)
-        inner_layout.setContentsMargins(16, 16, 16, 8)
-        inner_layout.setSpacing(8)
-
+        # All sections laid out directly in the sidebar — no scroll area.
+        # The window has a tall minimum height to keep everything visible.
+        sections_widget = QWidget()
+        sections_layout = QVBoxLayout(sections_widget)
+        sections_layout.setContentsMargins(16, 16, 16, 8)
+        sections_layout.setSpacing(6)
         for title, widget in (
             ("Data", self.data),
             ("Optical path", self.optical),
@@ -605,22 +691,16 @@ class SettingsPanel(QWidget):
             ("Display", self.display),
             ("Analysis", self.analysis),
         ):
-            inner_layout.addWidget(_section_title(title))
-            inner_layout.addWidget(widget)
-            inner_layout.addSpacing(4)
-        inner_layout.addStretch(1)
-
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setWidget(scroll_inner)
+            sections_layout.addWidget(_section_title(title))
+            sections_layout.addWidget(widget)
+        sections_layout.addStretch(1)
 
         button_row = QFrame()
         button_row.setStyleSheet(
             "background: transparent; border-top: 1px solid #E5E5EA;"
         )
         btn_layout = QVBoxLayout(button_row)
-        btn_layout.setContentsMargins(16, 12, 16, 12)
+        btn_layout.setContentsMargins(16, 10, 16, 12)
         btn_layout.setSpacing(8)
         btn_layout.addWidget(self.process_btn)
         btn_layout.addWidget(self.export_btn)
@@ -628,15 +708,24 @@ class SettingsPanel(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        layout.addWidget(scroll, 1)
+        layout.addWidget(sections_widget, 1)
         layout.addWidget(button_row)
 
     def set_export_enabled(self, enabled: bool) -> None:
         self.export_btn.setEnabled(enabled)
 
     def set_processing(self, busy: bool) -> None:
-        self.process_btn.setEnabled(not busy)
+        self._busy = busy
         self.process_btn.setText("Processing…" if busy else "▶  Process")
+        self._refresh_process_btn()
+
+    def set_calibrated(self, calibrated: bool) -> None:
+        """Called by MainWindow after auto-cal succeeds/fails."""
+        self._calibrated = calibrated
+        self._refresh_process_btn()
+
+    def _refresh_process_btn(self) -> None:
+        self.process_btn.setEnabled(self._calibrated and not self._busy)
 
     def set_acquiring(self, busy: bool) -> None:
         self.data.acquire_btn.setEnabled(not busy)
@@ -656,7 +745,7 @@ class SettingsPanel(QWidget):
             scope_ch1=self.data.scope_ch1_name,
             scope_ch2=self.data.scope_ch2_name,
             scope_send_single=self.data.scope_single.isChecked(),
-            delay_length_m=self.optical.delay_len.value(),
+            delay_length_m=self.optical.delay_length_m,
             n_core=self.optical.n_core.value(),
             aom_freq_mhz=self.optical.aom_freq.value(),
             delay_freq_hz=self.optical.delay_freq_hz,

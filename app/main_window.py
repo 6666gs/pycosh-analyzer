@@ -43,13 +43,21 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Dual-BPD Noise Analyzer")
-        self.resize(1320, 840)
+        # Default size leaves enough room for every sidebar card without
+        # scrolling; minimum stays modest so people on smaller laptops can
+        # still resize the window (some clipping at the bottom is OK).
+        self.setMinimumSize(1100, 800)
+        self.resize(1380, 1000)
 
         self._data: DualBpdData | None = None
         self._result: ProcessResult | None = None
         self._proc_worker: ProcessWorker | None = None
         self._cal_worker: CalibrateWorker | None = None
         self._acq_worker: AcquireWorker | None = None
+        # Whether the calibration currently running was launched by an
+        # explicit user click (True) or automatically on data load (False).
+        # Used to decide whether failure popups appear.
+        self._cal_user_initiated: bool = False
 
         self.settings = SettingsPanel()
         self.plot = SpectrumPlot()
@@ -70,7 +78,10 @@ class MainWindow(QMainWindow):
         self.settings.optionsChanged.connect(self._redraw)
         self.settings.processRequested.connect(self._start_process)
         self.settings.exportRequested.connect(self._export)
-        self.settings.calibrateRequested.connect(self._start_calibrate)
+        # User-initiated calibration: show popups on failure.
+        self.settings.calibrateRequested.connect(
+            lambda: self._start_calibrate(user_initiated=True)
+        )
         self.settings.acquireRequested.connect(self._start_acquire)
         self.settings.saveAcquiredRequested.connect(self._save_acquired)
 
@@ -86,8 +97,7 @@ class MainWindow(QMainWindow):
         f1 = self.settings.data.file1
         f2 = self.settings.data.file2
         if not f1:
-            self._data = None
-            self.settings.data.set_info("No data loaded.")
+            self._reset_loaded_data()
             return
         try:
             if mode == MODE_SINGLE_CSV:
@@ -105,6 +115,34 @@ class MainWindow(QMainWindow):
 
         self._update_data_info()
         self.settings.data.mark_acquired(False)
+        self._kick_off_autocal()
+
+    def _reset_loaded_data(self) -> None:
+        """Drop any loaded data and lock Process again."""
+        self._data = None
+        self.settings.data.set_info("No data loaded.")
+        self.settings.optical.reset_calibration()
+        self.settings.set_calibrated(False)
+
+    def _kick_off_autocal(self) -> None:
+        """Fresh data → invalidate any previous FSR and start auto-cal.
+        Process stays locked until calibration succeeds."""
+        self.settings.optical.reset_calibration()
+        self.settings.set_calibrated(False)
+        self._start_calibrate(user_initiated=False)
+
+    @staticmethod
+    def _launch_worker(worker, ok_slot, err_slot, *, done_slot=None) -> None:
+        """Wire the three common signals (finished_ok / finished_err /
+        finished→deleteLater) on a QThread worker, then start it. Any
+        worker-specific signal (e.g. `progress`) should be connected by
+        the caller before invoking this helper."""
+        worker.finished_ok.connect(ok_slot)
+        worker.finished_err.connect(err_slot)
+        if done_slot is not None:
+            worker.finished.connect(done_slot)
+        worker.finished.connect(worker.deleteLater)
+        worker.start()
 
     def _update_data_info(self, extra: str = "") -> None:
         if self._data is None:
@@ -142,13 +180,10 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Connecting to {host} …")
         self._acq_worker = AcquireWorker(host, ch1, ch2, send_single)
         self._acq_worker.progress.connect(self.statusBar().showMessage)
-        self._acq_worker.finished_ok.connect(self._on_acquire_ok)
-        self._acq_worker.finished_err.connect(self._on_acquire_err)
-        self._acq_worker.finished.connect(
-            lambda: self.settings.set_acquiring(False)
+        self._launch_worker(
+            self._acq_worker, self._on_acquire_ok, self._on_acquire_err,
+            done_slot=lambda: self.settings.set_acquiring(False),
         )
-        self._acq_worker.finished.connect(self._acq_worker.deleteLater)
-        self._acq_worker.start()
 
     def _on_acquire_ok(self, payload) -> None:
         frame, ch1, ch2 = payload
@@ -158,9 +193,7 @@ class MainWindow(QMainWindow):
         chs = ch1 + (f" + {ch2}" if ch2 else "")
         self._update_data_info(extra=f"From scope · {chs}")
         self.settings.data.mark_acquired(True)
-        self.statusBar().showMessage(
-            f"Acquired {self._data.n_samples:,} samples. Press Process to analyse."
-        )
+        self._kick_off_autocal()
 
     def _on_acquire_err(self, message: str) -> None:
         self.statusBar().showMessage("Acquisition failed.")
@@ -189,6 +222,14 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "No data",
                                 "Load a CSV file or acquire from scope first.")
             return
+        if not self.settings.optical.is_calibrated:
+            QMessageBox.warning(
+                self, "FSR not calibrated",
+                "FSR auto-calibration hasn't succeeded yet. The G(f) "
+                "compensation needs the true delay-line FSR — click "
+                "Re-calibrate or load cleaner data.",
+            )
+            return
         try:
             snap = self.settings.snapshot()
         except ValueError as exc:
@@ -199,7 +240,7 @@ class MainWindow(QMainWindow):
             v1=self._data.v1,
             v2=self._data.v2,
             sample_rate=self._data.sample_rate,
-            delay_freq=snap.delay_freq_hz,
+            delay_freq=snap.delay_freq_hz,  # guaranteed non-None by check above
             bw_segment=snap.bw_segment_hz,
             offset_start_ratio=snap.offset_start_ratio,
             range_start=snap.range_start,
@@ -210,10 +251,9 @@ class MainWindow(QMainWindow):
 
         self._proc_worker = ProcessWorker(req)
         self._proc_worker.progress.connect(self.statusBar().showMessage)
-        self._proc_worker.finished_ok.connect(self._on_process_ok)
-        self._proc_worker.finished_err.connect(self._on_process_err)
-        self._proc_worker.finished.connect(self._proc_worker.deleteLater)
-        self._proc_worker.start()
+        self._launch_worker(
+            self._proc_worker, self._on_process_ok, self._on_process_err,
+        )
 
     def _on_process_ok(self, result: ProcessResult) -> None:
         self._result = result
@@ -286,39 +326,47 @@ class MainWindow(QMainWindow):
 
     # ---------- calibration ----------
 
-    def _start_calibrate(self) -> None:
+    def _start_calibrate(self, *, user_initiated: bool = False) -> None:
+        """Run FSR auto-calibration. `user_initiated=True` means the user
+        clicked Re-calibrate (popup on failure); False means we kicked
+        it off from a data-load event (silent on failure)."""
         if self._data is None:
-            QMessageBox.warning(
-                self, "No data",
-                "Load a CSV file or acquire first — calibration reads the "
-                "FSR off a real beat trace.",
-            )
+            if user_initiated:
+                QMessageBox.warning(
+                    self, "No data",
+                    "Load a CSV file or acquire first — calibration reads "
+                    "the FSR off a real beat trace.",
+                )
             return
+        self._cal_user_initiated = user_initiated
         snap = self.settings.snapshot()
-        v = self._data.v1
-        sr = self._data.sample_rate
         self.statusBar().showMessage("Auto-calibrating FSR (Welch PSD + dip search)…")
-        self.settings.optical.calibrate_btn.setEnabled(False)
-        self._cal_worker = CalibrateWorker(v, sr, snap.n_core)
-        self._cal_worker.finished_ok.connect(self._on_calibrate_ok)
-        self._cal_worker.finished_err.connect(self._on_calibrate_err)
-        self._cal_worker.finished.connect(
-            lambda: self.settings.optical.calibrate_btn.setEnabled(True)
+        self.settings.optical.set_calibrating()
+        self._cal_worker = CalibrateWorker(
+            self._data.v1, self._data.sample_rate, snap.n_core,
         )
-        self._cal_worker.finished.connect(self._cal_worker.deleteLater)
-        self._cal_worker.start()
+        self._launch_worker(
+            self._cal_worker, self._on_calibrate_ok, self._on_calibrate_err,
+        )
 
     def _on_calibrate_ok(self, res: MziResult) -> None:
         if res.fsr_hz is None:
-            self.statusBar().showMessage("Calibration: no clean FSR zero detected.")
-            QMessageBox.information(
-                self, "Calibration",
-                "No clean FSR zero detected.\n\n"
-                f"Carrier ≈ {res.carrier_hz/1e6:.3f} MHz, "
-                "search band may need tuning."
+            self.settings.optical.calibration_failed()
+            self.settings.set_calibrated(False)
+            self.statusBar().showMessage(
+                "Calibration: no clean FSR zero detected."
             )
+            if self._cal_user_initiated:
+                QMessageBox.information(
+                    self, "Calibration",
+                    "FSR auto-calibration could not find a clean MZI fringe "
+                    f"zero (carrier ≈ {res.carrier_hz/1e6:.3f} MHz). "
+                    "Process is locked until calibration succeeds — try a "
+                    "longer record or check that the beat signal is clean."
+                )
             return
         self.settings.optical.apply_calibrated_fsr(res.fsr_hz)
+        self.settings.set_calibrated(True)
         verdict = "reliable" if res.reliable else "weak — verify manually"
         self.statusBar().showMessage(
             f"Calibrated FSR = {res.fsr_hz/1e6:.4f} MHz "
@@ -327,8 +375,11 @@ class MainWindow(QMainWindow):
         )
 
     def _on_calibrate_err(self, message: str) -> None:
+        self.settings.optical.calibration_failed()
+        self.settings.set_calibrated(False)
         self.statusBar().showMessage("Calibration failed.")
-        QMessageBox.critical(self, "Calibration failed", message)
+        if self._cal_user_initiated:
+            QMessageBox.critical(self, "Calibration failed", message)
 
     # ---------- export ----------
 
@@ -368,9 +419,11 @@ class MainWindow(QMainWindow):
                               f_max=snap.beta_f_max)
         meta = {
             "noise_type": snap.noise_type,
-            "delay_length_m": f"{snap.delay_length_m}",
+            "delay_length_m": (f"{snap.delay_length_m:.6g}"
+                               if snap.delay_length_m is not None else "n/a"),
             "n_core": f"{snap.n_core}",
-            "FSR_Hz": f"{snap.delay_freq_hz:.6f}",
+            "FSR_Hz": (f"{snap.delay_freq_hz:.6f}"
+                       if snap.delay_freq_hz is not None else "n/a"),
             "AOM_carrier_MHz": f"{snap.aom_freq_mhz}",
             "bw_segment_Hz": ",".join(f"{v:.0f}" for v in snap.bw_segment_hz),
             "offset_start_ratio": f"{snap.offset_start_ratio}",

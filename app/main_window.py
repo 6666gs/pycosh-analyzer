@@ -43,11 +43,11 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Dual-BPD Noise Analyzer")
-        # Default size leaves enough room for every sidebar card without
-        # scrolling; minimum stays modest so people on smaller laptops can
-        # still resize the window (some clipping at the bottom is OK).
-        self.setMinimumSize(1100, 800)
-        self.resize(1380, 1000)
+        # The sidebar scrolls vertically when too short to show every
+        # section, so the window minimum can be modest. Default size aims
+        # to fit every card without needing the scrollbar on most displays.
+        self.setMinimumSize(1000, 680)
+        self.resize(1380, 980)
 
         self._data: DualBpdData | None = None
         self._result: ProcessResult | None = None

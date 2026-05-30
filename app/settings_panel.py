@@ -678,12 +678,15 @@ class SettingsPanel(QWidget):
         self.process_btn.clicked.connect(self.processRequested.emit)
         self.export_btn.clicked.connect(self.exportRequested.emit)
 
-        # All sections laid out directly in the sidebar — no scroll area.
-        # The window has a tall minimum height to keep everything visible.
+        # Sections live in a vertical-scroll-only container. We never
+        # want the sidebar to scroll horizontally — when the user shrinks
+        # the window, content should clip / wrap, not slide sideways —
+        # and we want vertical scroll only as a fallback when the window
+        # is too short to show every section at its natural size.
         sections_widget = QWidget()
         sections_layout = QVBoxLayout(sections_widget)
         sections_layout.setContentsMargins(16, 16, 16, 8)
-        sections_layout.setSpacing(6)
+        sections_layout.setSpacing(8)
         for title, widget in (
             ("Data", self.data),
             ("Optical path", self.optical),
@@ -694,6 +697,18 @@ class SettingsPanel(QWidget):
             sections_layout.addWidget(_section_title(title))
             sections_layout.addWidget(widget)
         sections_layout.addStretch(1)
+
+        scroll = QScrollArea()
+        scroll.setObjectName("sidebarScroll")
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        scroll.setWidget(sections_widget)
 
         button_row = QFrame()
         button_row.setStyleSheet(
@@ -708,7 +723,7 @@ class SettingsPanel(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        layout.addWidget(sections_widget, 1)
+        layout.addWidget(scroll, 1)
         layout.addWidget(button_row)
 
     def set_export_enabled(self, enabled: bool) -> None:

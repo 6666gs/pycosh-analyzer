@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QRadioButton,
     QScrollArea,
+    QSizePolicy,
     QSpinBox,
     QStackedWidget,
     QVBoxLayout,
@@ -72,6 +73,29 @@ def _secondary_btn(text: str) -> QPushButton:
     btn = QPushButton(text)
     btn.setProperty("variant", "secondary")
     return btn
+
+
+def _shrinkable(widget: QWidget) -> QWidget:
+    """Allow this widget to shrink below its content-derived sizeHint
+    when its parent layout is narrower than the content (e.g. a
+    QLineEdit with a long default text inside a fixed-width sidebar).
+    Without this the QStackedWidget / QFormLayout forces the whole
+    section card wider than the sidebar viewport and content gets
+    clipped horizontally."""
+    widget.setMinimumWidth(0)
+    pol = widget.sizePolicy()
+    pol.setHorizontalPolicy(QSizePolicy.Policy.Ignored)
+    widget.setSizePolicy(pol)
+    return widget
+
+
+def _grow_form(form: QFormLayout) -> QFormLayout:
+    """Make a form layout's field column flex with available width
+    rather than freezing at the field's sizeHint."""
+    form.setFieldGrowthPolicy(
+        QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
+    )
+    return form
 
 
 # ---------- value object exposed to MainWindow ----------
@@ -131,17 +155,20 @@ class DataSection(QFrame):
         for key in (MODE_SINGLE_CSV, MODE_TWO_CSV, MODE_ACQUIRE):
             self.mode_combo.addItem(MODE_LABELS[key], userData=key)
         self.mode_combo.currentIndexChanged.connect(self._update_mode)
+        _shrinkable(self.mode_combo)
 
         # --- File-mode widgets ---
         self.file1_edit = QLineEdit()
         self.file1_edit.setPlaceholderText("BPD1 / dual CSV path…")
         self.file1_edit.setReadOnly(True)
+        _shrinkable(self.file1_edit)
         self.file1_btn = _secondary_btn("Browse")
         self.file1_btn.clicked.connect(lambda: self._pick(1))
 
         self.file2_edit = QLineEdit()
         self.file2_edit.setPlaceholderText("BPD2 path (only in two-file mode)…")
         self.file2_edit.setReadOnly(True)
+        _shrinkable(self.file2_edit)
         self.file2_btn = _secondary_btn("Browse")
         self.file2_btn.clicked.connect(lambda: self._pick(2))
 
@@ -159,7 +186,8 @@ class DataSection(QFrame):
 
         # --- Scope-mode widgets ---
         self.scope_ip = QLineEdit("192.168.1.50")
-        self.scope_ip.setPlaceholderText("IP or hostname (e.g. 192.168.1.50)")
+        self.scope_ip.setPlaceholderText("IP or hostname")
+        _shrinkable(self.scope_ip)
 
         self.scope_ch1 = QComboBox()
         for ch in SCOPE_CHANNELS:
@@ -172,7 +200,7 @@ class DataSection(QFrame):
         self.scope_ch2.addItem(NONE_CH_LABEL)
         self.scope_ch2.setCurrentText("C4")
 
-        self.scope_single = QCheckBox("Send SINGle trigger before reading")
+        self.scope_single = QCheckBox("Send SINGle trigger first")
 
         self.acquire_btn = QPushButton("⏺  Acquire from scope")
         self.acquire_btn.setProperty("variant", "secondary")
@@ -183,18 +211,22 @@ class DataSection(QFrame):
         self.save_acquired_btn.clicked.connect(self.saveAcquiredRequested.emit)
 
         scope_widget = QWidget()
-        scope_form = QFormLayout(scope_widget)
+        scope_form = _grow_form(QFormLayout(scope_widget))
         scope_form.setContentsMargins(0, 0, 0, 0)
         scope_form.setSpacing(6)
         scope_form.addRow("Scope IP", self.scope_ip)
         scope_form.addRow("BPD1 channel", self.scope_ch1)
         scope_form.addRow("BPD2 channel", self.scope_ch2)
         scope_form.addRow("", self.scope_single)
-        scope_btn_row = QHBoxLayout()
-        scope_btn_row.setSpacing(6)
-        scope_btn_row.addWidget(self.acquire_btn, 1)
-        scope_btn_row.addWidget(self.save_acquired_btn, 1)
-        scope_form.addRow("", self._row_widget(scope_btn_row))
+        # Stack the two action buttons vertically: side-by-side they would
+        # force a minimum row width that overflows the sidebar (the
+        # QStackedWidget reserves the wider page's sizeHint for both modes).
+        scope_btn_col = QVBoxLayout()
+        scope_btn_col.setSpacing(6)
+        scope_btn_col.setContentsMargins(0, 0, 0, 0)
+        scope_btn_col.addWidget(self.acquire_btn)
+        scope_btn_col.addWidget(self.save_acquired_btn)
+        scope_form.addRow("", self._row_widget(scope_btn_col))
 
         # Single stack: page 0 = file pickers (shared by single_csv + two_csv,
         # the file2 row is just disabled in single_csv mode), page 1 = scope.
@@ -323,15 +355,19 @@ class OpticalSection(QFrame):
         self.n_core.setSingleStep(0.001)
         self.n_core.setValue(1.468)
         self.n_core.valueChanged.connect(self._refresh_display)
+        _shrinkable(self.n_core)
 
         self.aom_freq = QDoubleSpinBox()
         self.aom_freq.setRange(0.0, 5_000.0)
         self.aom_freq.setSuffix(" MHz")
         self.aom_freq.setDecimals(3)
         self.aom_freq.setValue(80.0)
+        _shrinkable(self.aom_freq)
 
         self.fsr_display = _metric(_FSR_STATE_TEXTS[_FsrState.IDLE][0])
+        self.fsr_display.setWordWrap(True)
         self.delay_len_display = _metric(_FSR_STATE_TEXTS[_FsrState.IDLE][1])
+        self.delay_len_display.setWordWrap(True)
 
         self.calibrate_btn = _secondary_btn("Re-calibrate FSR")
         self.calibrate_btn.setEnabled(False)
@@ -432,6 +468,7 @@ class SegmentSection(QFrame):
 
         self.bw_edit = QLineEdit("1, 3, 10, 30, 100, 300, 1000, 3000, 10000")
         self.bw_edit.setPlaceholderText("comma-separated, in kHz")
+        _shrinkable(self.bw_edit)
 
         self.ratio = QSpinBox()
         self.ratio.setRange(2, 200)
@@ -439,10 +476,12 @@ class SegmentSection(QFrame):
 
         self.range_start = QLineEdit()
         self.range_start.setPlaceholderText("auto")
+        _shrinkable(self.range_start)
         self.range_stop = QLineEdit()
         self.range_stop.setPlaceholderText("auto")
+        _shrinkable(self.range_stop)
 
-        form = QFormLayout()
+        form = _grow_form(QFormLayout())
         form.setSpacing(6)
         form.setContentsMargins(0, 0, 0, 0)
         form.addRow("BW bins (kHz)", self.bw_edit)
@@ -543,10 +582,11 @@ class AnalysisSection(QFrame):
         super().__init__(parent)
         self.setObjectName("sectionCard")
 
-        # Toggles
-        self.c_show_beta = QCheckBox("Show β-separation line")
+        # Toggles. Text kept short so the two checkboxes fit on one row
+        # inside a narrow sidebar without forcing horizontal overflow.
+        self.c_show_beta = QCheckBox("β-line")
         self.c_show_beta.setChecked(True)
-        self.c_show_lorentz = QCheckBox("Show Lorentzian floor")
+        self.c_show_lorentz = QCheckBox("Lorentz floor")
         self.c_show_lorentz.setChecked(True)
         for w in (self.c_show_beta, self.c_show_lorentz):
             w.toggled.connect(self.optionsChanged.emit)
@@ -556,6 +596,8 @@ class AnalysisSection(QFrame):
         self.lorentz_fmax = QLineEdit("1e7")
         self.lorentz_fmin.editingFinished.connect(self.optionsChanged.emit)
         self.lorentz_fmax.editingFinished.connect(self.optionsChanged.emit)
+        _shrinkable(self.lorentz_fmin)
+        _shrinkable(self.lorentz_fmax)
 
         # β integration range (None = auto = use full freq range)
         self.beta_fmin = QLineEdit()
@@ -564,12 +606,16 @@ class AnalysisSection(QFrame):
         self.beta_fmax.setPlaceholderText("auto")
         self.beta_fmin.editingFinished.connect(self.optionsChanged.emit)
         self.beta_fmax.editingFinished.connect(self.optionsChanged.emit)
+        _shrinkable(self.beta_fmin)
+        _shrinkable(self.beta_fmax)
 
-        # Result displays
+        # Result displays — wrap long lines instead of forcing card wider
         self.lorentz_display = _metric("Lorentz FWHM: —")
+        self.lorentz_display.setWordWrap(True)
         self.beta_display = _metric("β-FWHM (Gauss): —")
+        self.beta_display.setWordWrap(True)
 
-        form = QFormLayout()
+        form = _grow_form(QFormLayout())
         form.setSpacing(6)
         form.setContentsMargins(0, 0, 0, 0)
 
@@ -633,8 +679,10 @@ class SettingsPanel(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("sidebar")
-        self.setMinimumWidth(340)
-        self.setMaximumWidth(400)
+        # Width range chosen so even the widest section content (DataSection
+        # in scope mode) fits at the minimum without horizontal clipping.
+        self.setMinimumWidth(380)
+        self.setMaximumWidth(440)
 
         self.data = DataSection()
         self.optical = OpticalSection()

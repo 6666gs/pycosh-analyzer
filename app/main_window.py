@@ -373,6 +373,11 @@ class MainWindow(QMainWindow):
             f"→ ΔL ≈ {res.delta_L_m:.3f} m  ({verdict}, "
             f"contrast {res.contrast:.0f}×)."
         )
+        # A good FSR is the only thing Process was waiting on, so run it
+        # automatically. This covers every path that reaches calibration —
+        # CSV load, scope acquire, and manual re-calibrate — so the user
+        # never needs a separate Process click.
+        self._start_process()
 
     def _on_calibrate_err(self, message: str) -> None:
         self.settings.optical.calibration_failed()
@@ -387,29 +392,29 @@ class MainWindow(QMainWindow):
         if self._result is None:
             return
         snap = self.settings.snapshot()
-        suggested = ("noise_spectrum_phase.csv"
-                     if snap.noise_type == "phase"
-                     else "noise_spectrum_frequency.csv")
         path, _ = QFileDialog.getSaveFileName(
-            self, "Export spectrum", suggested, "CSV (*.csv)",
+            self, "Export spectra", "noise_spectrum.csv", "CSV (*.csv)",
         )
         if not path:
             return
         r = self._result
-        if snap.noise_type == "phase":
-            cols = {
-                "S_phi_BPD1_rad2_per_Hz": r.s_phi_11,
-                "S_phi_BPD2_rad2_per_Hz": r.s_phi_22,
-                "S_phi_cross_rad2_per_Hz": r.s_phi_12,
-                "S_phi_cross_err_rad2_per_Hz": r.s_phi_12_err,
-            }
-        else:
-            cols = {
-                "S_nu_BPD1_Hz2_per_Hz": r.s_nu_11,
-                "S_nu_BPD2_Hz2_per_Hz": r.s_nu_22,
-                "S_nu_cross_Hz2_per_Hz": r.s_nu_12,
-                "S_nu_cross_err_Hz2_per_Hz": r.s_nu_12_err,
-            }
+
+        # Export both the frequency-noise (Sν) and phase-noise (Sφ) spectra in
+        # one file, independent of the on-screen display toggle. BPD2 columns
+        # are only meaningful when a second channel was acquired.
+        has_bpd2 = r.request.v2 is not None
+        cols = {
+            "S_nu_BPD1_Hz2_per_Hz": r.s_nu_11,
+        }
+        if has_bpd2:
+            cols["S_nu_BPD2_Hz2_per_Hz"] = r.s_nu_22
+        cols["S_nu_cross_Hz2_per_Hz"] = r.s_nu_12
+        cols["S_nu_cross_err_Hz2_per_Hz"] = r.s_nu_12_err
+        cols["S_phi_BPD1_rad2_per_Hz"] = r.s_phi_11
+        if has_bpd2:
+            cols["S_phi_BPD2_rad2_per_Hz"] = r.s_phi_22
+        cols["S_phi_cross_rad2_per_Hz"] = r.s_phi_12
+        cols["S_phi_cross_err_rad2_per_Hz"] = r.s_phi_12_err
 
         lz = fit_lorentz_floor(r.freq, r.s_nu_12,
                                f_min=snap.lorentz_f_min,
@@ -418,7 +423,7 @@ class MainWindow(QMainWindow):
                               f_min=snap.beta_f_min,
                               f_max=snap.beta_f_max)
         meta = {
-            "noise_type": snap.noise_type,
+            "spectrum_convention": "single-sideband (SSB)",
             "delay_length_m": (f"{snap.delay_length_m:.6g}"
                                if snap.delay_length_m is not None else "n/a"),
             "n_core": f"{snap.n_core}",

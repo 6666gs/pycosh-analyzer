@@ -19,9 +19,9 @@ Apple 浅色风格，跨平台（macOS / Windows / Linux），支持示波器实
 | **多分辨率 Welch 处理** | 可编辑 BW 分段 + offset-start ratio；多频段平均得到低噪声底 |
 | **实时绘图切换** | S<sub>ν</sub> ↔ S<sub>φ</sub>、单通道 PSD vs 互相关、误差带 |
 | **FSR 自动校准** | 从实际拍频信号检测 MZI 自由谱宽（Welch + Savitzky-Golay + 谷点搜索），反推光纤长度 |
-| **Lorentzian 底拟合** | 在指定高偏置带内对 S<sub>ν</sub>(f) 取鲁棒中位数 → FWHM<sub>L</sub> = π · S<sub>0</sub> |
+| **Lorentzian 底拟合** | 在指定高偏置带内取 S<sub>ν</sub>(f) 的最小值 → FWHM<sub>L</sub> = π · S<sub>0</sub>（单边谱） |
 | **β-separation 线 + 积分** | Di Domenico 2010 方法 —— 叠加 β 线并由其上方面积报告高斯 FWHM |
-| **CSV 导出** | 频率/相位噪声、3 路曲线 + 误差列、完整元数据头（延迟、FSR、AOM、分段、线宽拟合） |
+| **CSV 导出** | 一键将频率与相位噪声谱（全部曲线 + 误差列）同时写入单个 CSV，含完整元数据头（延迟、FSR、AOM、分段、线宽拟合） |
 
 ---
 
@@ -105,9 +105,9 @@ export DBPD_SDS7404_PARENT=/path/to/folder-containing-sds7404
 1. 侧栏 → **Data** → 选 `Single CSV` 或 `Two CSVs` → Browse
 2. **Optical path** → 填入延迟长度 / n_core / AOM 载频（或加载数据后点击 *Auto-calibrate FSR*）
 3. **Segments** → 留默认值，或参考下方推荐表
-4. ▶ **Process**
+4. FSR 校准成功后**自动开始处理**；修改光路或分段设置后，点击 ▶ **Process** 重新运行
 5. **Analysis** 卡片实时显示 Lorentz FWHM 和 β-integrated Gaussian FWHM；调整拟合 / 积分区间可细化
-6. **Export spectrum…** 导出含完整元数据头的 4 列 CSV
+6. **Export spectra…** 导出含完整元数据头的单个 CSV，同时包含 S<sub>ν</sub> 与 S<sub>φ</sub>（全部曲线 + 误差列）
 
 ### 模式 B —— 从示波器实时采集
 
@@ -260,8 +260,8 @@ for i in 1..N:
 
 - AOM 载频**不是**一个参数；pycosh 通过跳过 DC bin 隐式排除掉它（偏置从
   `offset_start_ratio · bw[0]` 开始）
-- 全程使用双边功率谱密度。Lorentz FWHM = π · S<sub>0</sub> 也是这个约定下的结果
-  （单边约定时是 2π · S<sub>0</sub>）
+- 应用显示**单边谱（SSB）**功率谱密度：pycosh 输出双边谱，应用将其乘 2 用于显示。
+  在该约定下 Lorentz FWHM = π · S<sub>0</sub>，β 线为 8 ln2/π² · f（Di Domenico 2010，单边）
 
 算法本身已通过对白噪声合成激光的数值仿真验证 —— 见姐妹仓库的
 [verify_pycosh.py](../sds7404/verify_pycosh.py)。

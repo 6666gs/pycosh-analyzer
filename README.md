@@ -21,9 +21,9 @@ extraction (Lorentzian + β-separation), and MZI FSR self-calibration.
 | **Multi-resolution Welch processing** | User-editable BW segments + offset-start ratio; multi-band averaging for low-noise floors |
 | **Live plot toggles** | S<sub>ν</sub> ↔ S<sub>φ</sub>, per-channel single PSD vs cross-correlation, error band |
 | **Auto-calibrate FSR** | Detect the MZI free-spectral range from a real beat trace (Welch + Savitzky-Golay + dip search) and back-solve fiber length |
-| **Lorentzian floor fit** | Robust median of S<sub>ν</sub>(f) over a chosen high-offset band → FWHM<sub>L</sub> = π · S<sub>0</sub> |
+| **Lorentzian floor fit** | Minimum of S<sub>ν</sub>(f) over a chosen high-offset band → FWHM<sub>L</sub> = π · S<sub>0</sub> (single-sideband) |
 | **β-separation line + integration** | Di Domenico 2010 method — overlay β-line and report the Gaussian FWHM from the area above it |
-| **CSV export** | Frequency- or phase-noise, all three traces + error column, full metadata header (delay, FSR, AOM, segments, linewidth fits) |
+| **CSV export** | One click writes **both** frequency- and phase-noise spectra (all traces + error columns) to a single CSV with a full metadata header (delay, FSR, AOM, segments, linewidth fits) |
 
 ---
 
@@ -111,9 +111,9 @@ not before, so a clean clone always works out of the box.
 1. Sidebar → **Data** → pick `Single CSV` or `Two CSVs` → Browse
 2. **Optical path** → set delay length / n_core / AOM carrier (or click *Auto-calibrate FSR* once data is loaded)
 3. **Segments** → leave defaults, or use the recommendation tables below
-4. ▶ **Process**
+4. Processing runs **automatically** once FSR calibration succeeds; after changing optical or segment settings, click ▶ **Process** to re-run
 5. **Analysis** card shows Lorentz FWHM and β-integrated Gaussian FWHM in real time; tweak the fit/integration bands to refine
-6. **Export spectrum…** writes a 4-column CSV with full metadata header
+6. **Export spectra…** writes one CSV containing both S<sub>ν</sub> and S<sub>φ</sub> (all traces + error columns) with a full metadata header
 
 ### Mode B — Live capture from oscilloscope
 
@@ -281,8 +281,10 @@ and the Yuan 2022 paper. Two non-obvious points:
 - The AOM carrier frequency is **not** a parameter; pycosh implicitly
   rejects it by skipping the DC bin (offsets start at
   `offset_start_ratio · bw[0]`)
-- Two-sided spectral densities throughout. Lorentz FWHM = π · S<sub>0</sub>
-  uses the same convention (single-sided would be 2π · S<sub>0</sub>)
+- The app displays **single-sideband (SSB)** spectral densities: pycosh
+  emits a two-sided PSD, which the app multiplies by 2 for display. In this
+  convention Lorentz FWHM = π · S<sub>0</sub> and the β-line is 8 ln2/π² · f
+  (Di Domenico 2010, one-sided)
 
 The algorithm itself was numerically verified against simulated white-
 frequency-noise lasers — see [verify_pycosh.py](../sds7404/verify_pycosh.py)

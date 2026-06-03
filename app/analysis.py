@@ -4,7 +4,9 @@ References:
     Di Domenico, Schilt, Thomann, "Simple approach to the relation between
     laser frequency noise and laser line shape," Appl. Opt. 49, 4801 (2010).
 
-Conventions follow Yuan et al. (2022, COSH paper): two-sided S_ν in Hz²/Hz.
+Single-sideband (SSB) convention: S_ν is the one-sided density in Hz²/Hz
+(positive offsets only). Di Domenico's relations apply directly in this
+convention — FWHM_Lorentz = π · S₀ and the β-line is 8 ln2/π² · f.
 """
 from __future__ import annotations
 
@@ -14,18 +16,18 @@ import numpy as np
 
 # β-separation slope: above β-line, frequency noise contributes to the
 # Gaussian (slow) part of the line; below it, to the Lorentzian (fast) part.
-# β(f) = 8 ln(2) / π² · f ≈ 0.5615 · f       (two-sided convention, Hz²/Hz)
+# β(f) = 8 ln(2) / π² · f ≈ 0.5615 · f       (single-sideband S_ν, Hz²/Hz)
 BETA_SLOPE = 8.0 * np.log(2.0) / (np.pi**2)
 
 
 @dataclass(frozen=True)
 class LorentzFit:
     """White-noise floor S₀ and corresponding Lorentzian FWHM = π · S₀."""
-    s0_hz2_per_hz: float          # white-noise PSD level
+    s0_hz2_per_hz: float          # white-noise PSD level (band minimum)
     fwhm_hz: float                # Lorentzian FWHM = π · S₀
     f_min: float
     f_max: float
-    n_points: int                 # how many bins went into the median
+    n_points: int                 # how many bins were searched for the minimum
 
 
 @dataclass(frozen=True)
@@ -52,8 +54,11 @@ def fit_lorentz_floor(
 ) -> LorentzFit | None:
     """Estimate the white-noise floor S₀ from a clean high-offset band.
 
-    Uses a robust median to reject MZI G(f) fringe spikes (which appear at
-    integer multiples of FSR). FWHM_Lorentz = π · S₀.
+    Takes the *minimum* of S_ν over the band: the white-noise floor is the
+    lowest the spectrum reaches, and the minimum naturally rejects the
+    upward MZI G(f) fringe spikes (which appear at integer multiples of FSR).
+    FWHM_Lorentz = π · S₀. Pick the band to avoid spurious low-noise dips,
+    since the minimum is more sensitive to a single low bin than a median.
 
     Returns None if fewer than 3 points fall in [f_min, f_max].
     """
@@ -64,7 +69,7 @@ def fit_lorentz_floor(
     mask = (freq >= f_min) & (freq <= f_max) & np.isfinite(s_nu) & (s_nu > 0)
     if mask.sum() < 3:
         return None
-    s0 = float(np.median(s_nu[mask]))
+    s0 = float(np.min(s_nu[mask]))
     return LorentzFit(
         s0_hz2_per_hz=s0,
         fwhm_hz=float(np.pi * s0),

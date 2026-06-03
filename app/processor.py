@@ -13,6 +13,13 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 VENDOR_PYCOSH_PARENT = _REPO_ROOT / "vendor"
 EXTERNAL_PYCOSH_PARENT_ENV = "DBPD_PYCOSH_PARENT"
 
+# pycosh returns a *two-sided* PSD (S(f) defined for ±f). We display the
+# single-sideband (SSB) spectrum — positive frequencies only — so every
+# physical spectrum is the two-sided density times this factor. With the SSB
+# convention the Di Domenico relations hold directly: FWHM_Lorentz = π · S₀
+# and the β-separation line is 8 ln2/π² · f (see app/analysis.py).
+SSB_FACTOR = 2.0
+
 
 def ensure_pycosh_importable() -> None:
     """Make `pycosh` importable. Prefers the vendored copy under vendor/;
@@ -62,22 +69,23 @@ class ProcessResult:
     psd12_err: np.ndarray
     request: ProcessRequest
 
-    # Derived spectra (G(f) compensated)
+    # Derived spectra (G(f) compensated), single-sideband (× SSB_FACTOR).
+    # s_phi_* derive from s_nu_*, so they inherit the SSB factor automatically.
     @property
     def s_nu_11(self) -> np.ndarray:
-        return np.abs(self.psd11) / self.gfilter
+        return SSB_FACTOR * np.abs(self.psd11) / self.gfilter
 
     @property
     def s_nu_22(self) -> np.ndarray:
-        return np.abs(self.psd22) / self.gfilter
+        return SSB_FACTOR * np.abs(self.psd22) / self.gfilter
 
     @property
     def s_nu_12(self) -> np.ndarray:
-        return np.abs(self.psd12) / self.gfilter
+        return SSB_FACTOR * np.abs(self.psd12) / self.gfilter
 
     @property
     def s_nu_12_err(self) -> np.ndarray:
-        return np.abs(self.psd12_err) / self.gfilter
+        return SSB_FACTOR * np.abs(self.psd12_err) / self.gfilter
 
     @property
     def s_phi_11(self) -> np.ndarray:

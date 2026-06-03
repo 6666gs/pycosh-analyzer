@@ -539,8 +539,9 @@ class DisplaySection(QFrame):
         self.c_bpd2 = QCheckBox("BPD2 single")
         self.c_cross = QCheckBox("Cross-correlation")
         self.c_cross.setChecked(True)
+        # Error band is opt-in: off by default to keep the plot clean.
         self.c_errband = QCheckBox("Show error band")
-        self.c_errband.setChecked(True)
+        self.c_errband.setChecked(False)
 
         for w in (self.r_freq, self.r_phase, self.c_bpd1, self.c_bpd2,
                   self.c_cross, self.c_errband):
@@ -713,7 +714,7 @@ class SettingsPanel(QWidget):
         self._calibrated: bool = False
         self.process_btn.setEnabled(False)
 
-        self.export_btn = _secondary_btn("Export spectrum…")
+        self.export_btn = _secondary_btn("Export spectra…")
         self.export_btn.setEnabled(False)
 
         # forward signals

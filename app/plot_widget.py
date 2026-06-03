@@ -64,14 +64,14 @@ class SpectrumPlot(QWidget):
             y_22 = result.s_phi_22
             y_12 = result.s_phi_12
             y_12_err = result.s_phi_12_err
-            title = "Phase noise spectrum"
+            title = "Single-sideband (SSB) phase noise spectrum"
         else:
             y_label = r"$S_\nu$  (Hz$^2$/Hz)"
             y_11 = result.s_nu_11
             y_22 = result.s_nu_22
             y_12 = result.s_nu_12
             y_12_err = result.s_nu_12_err
-            title = "Frequency noise spectrum"
+            title = "Single-sideband (SSB) frequency noise spectrum"
 
         if options.show_bpd1:
             self._ax.loglog(freq, y_11, label="BPD1 (single)",
@@ -108,8 +108,10 @@ class SpectrumPlot(QWidget):
         self._ax.set_xlabel("Offset frequency (Hz)", color="#1D1D1F")
         self._ax.set_ylabel(y_label, color="#1D1D1F")
 
-        # Add a subtitle with β-integration result if available
+        # Add a subtitle with β-integration result only when the β option is
+        # selected (the same checkbox that draws the β-line) and Sν is shown.
         if (options.noise_type == "frequency"
+                and options.show_beta_line
                 and options.beta_fit is not None):
             subtitle = (
                 f"β-integrated Gaussian FWHM = "

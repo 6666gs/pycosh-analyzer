@@ -124,3 +124,31 @@ def test_trend_plot_clear(qtbot):
     trend.update_trend([0.0, 1.0], [1e4, 2e4])
     trend.clear()
     assert len(trend._ax.get_lines()) == 0
+
+
+def test_monitor_button_gating(qtbot):
+    from app.main_window import MainWindow
+    from app.settings_panel import MODE_ACQUIRE
+
+    win = MainWindow()
+    qtbot.addWidget(win)
+    sp = win.settings
+
+    # Not calibrated → monitor disabled
+    sp.set_calibrated(False)
+    assert sp.monitor_btn.isEnabled() is False
+
+    # Calibrated + acquire mode → monitor enabled
+    sp.data.mode_combo.setCurrentIndex(
+        sp.data.mode_combo.findData(MODE_ACQUIRE))
+    sp.set_calibrated(True)
+    assert sp.monitor_btn.isEnabled() is True
+
+    # While monitoring: label flips, Process disabled, monitor stays enabled
+    sp.set_monitoring(True)
+    assert "Stop" in sp.monitor_btn.text()
+    assert sp.process_btn.isEnabled() is False
+    assert sp.monitor_btn.isEnabled() is True
+
+    sp.set_monitoring(False)
+    assert "Monitor" in sp.monitor_btn.text()

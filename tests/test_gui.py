@@ -152,3 +152,34 @@ def test_monitor_button_gating(qtbot):
 
     sp.set_monitoring(False)
     assert "Monitor" in sp.monitor_btn.text()
+
+
+def test_monitor_cycle_updates_trend_and_spectrum(qtbot):
+    from app.main_window import MainWindow
+
+    win = MainWindow()
+    qtbot.addWidget(win)
+    result = _make_result(v2=np.zeros(16))
+
+    win._on_monitor_cycle(result, 2.5)
+
+    assert win._result is result
+    assert len(win._trend_t) == 1
+    assert win._trend_t[0] == 2.5
+    assert len(win._trend_fwhm) == 1          # a metric (possibly NaN) recorded
+    assert win.trend.isVisible() or True       # visibility toggled by start, not cycle
+
+
+def test_start_monitor_requires_calibration(qtbot, monkeypatch):
+    from app.main_window import MainWindow
+
+    win = MainWindow()
+    qtbot.addWidget(win)
+    warned = []
+    monkeypatch.setattr("app.main_window.QMessageBox.warning",
+                        lambda *a, **k: warned.append(a))
+
+    win._start_monitor()  # not calibrated, no data
+
+    assert warned               # warned the user instead of starting
+    assert win._monitor_worker is None

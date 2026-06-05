@@ -101,3 +101,26 @@ def test_calibration_success_auto_processes(qtbot, monkeypatch):
 
     win._on_calibrate_ok(_Res())
     assert calls == [True]
+
+
+def test_trend_plot_renders_points(qtbot):
+    from app.plot_widget import TrendPlot
+
+    trend = TrendPlot()
+    qtbot.addWidget(trend)
+    trend.update_trend([0.0, 1.5, 3.0], [1.2e4, 9.0e3, float("nan")])
+
+    title = trend._ax.get_title()
+    assert "FWHM" in title
+    # one Line2D drawn for the trend
+    assert len(trend._ax.get_lines()) >= 1
+
+
+def test_trend_plot_clear(qtbot):
+    from app.plot_widget import TrendPlot
+
+    trend = TrendPlot()
+    qtbot.addWidget(trend)
+    trend.update_trend([0.0, 1.0], [1e4, 2e4])
+    trend.clear()
+    assert len(trend._ax.get_lines()) == 0

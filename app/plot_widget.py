@@ -159,3 +159,43 @@ def _format_hz(value: float) -> str:
     if value >= 1e3:
         return f"{value / 1e3:.3g} kHz"
     return f"{value:.3g} Hz"
+
+
+class TrendPlot(QWidget):
+    """Compact strip charting a scalar lock metric (Lorentz FWHM) vs time."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.figure = Figure(figsize=(8, 1.8), facecolor="white")
+        self.canvas = FigureCanvasQTAgg(self.figure)
+        self.setMaximumHeight(200)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(self.canvas)
+
+        self._ax = self.figure.add_subplot(111)
+        self.clear()
+
+    def clear(self) -> None:
+        self._ax.clear()
+        self._ax.set_title("Lock monitor — Lorentz FWHM vs elapsed time",
+                           color="#1D1D1F", fontsize=10, pad=6)
+        self._ax.set_xlabel("Elapsed time (s)", color="#1D1D1F", fontsize=9)
+        self._ax.set_ylabel("FWHM (Hz)", color="#1D1D1F", fontsize=9)
+        self._ax.grid(True, which="both", alpha=0.25, linewidth=0.5)
+        self._ax.tick_params(colors="#1D1D1F", labelsize=8)
+        for spine in self._ax.spines.values():
+            spine.set_color("#E5E5EA")
+        self._ax.set_facecolor("white")
+        self.figure.tight_layout()
+        self.canvas.draw_idle()
+
+    def update_trend(self, times: list[float], fwhms: list[float]) -> None:
+        self.clear()
+        if times and fwhms:
+            self._ax.semilogy(times, fwhms, color="#007AFF", linewidth=1.4,
+                              marker="o", markersize=3)
+        self.figure.tight_layout()
+        self.canvas.draw_idle()

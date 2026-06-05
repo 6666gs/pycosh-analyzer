@@ -37,7 +37,12 @@ def ensure_sds7404_importable() -> None:
 
 
 class AcquireWorker(QThread):
-    """Pulls a multichannel frame from the scope off the main thread."""
+    """Pulls a multichannel frame from the scope off the main thread.
+
+    After reading, resumes live acquisition (Feature: scope keeps running
+    after a one-shot Acquire) unless `resume=False`. `scope_factory` lets
+    tests inject a fake scope; production uses the vendored SDS7404 driver.
+    """
     progress = Signal(str)
     finished_ok = Signal(object)     # (frame, ch1_name, ch2_name)
     finished_err = Signal(str)
@@ -48,7 +53,9 @@ class AcquireWorker(QThread):
         ch1: str,
         ch2: str | None,
         send_single: bool = False,
+        resume: bool = True,
         timeout_ms: int = 30_000,
+        scope_factory=None,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
@@ -56,15 +63,20 @@ class AcquireWorker(QThread):
         self.ch1 = ch1
         self.ch2 = ch2
         self.send_single = send_single
+        self.resume = resume
         self.timeout_ms = timeout_ms
+        self._scope_factory = scope_factory
+
+    def _open_scope(self):
+        if self._scope_factory is not None:
+            return self._scope_factory(self.host, timeout_ms=self.timeout_ms)
+        ensure_sds7404_importable()
+        from sds7404 import SDS7404  # type: ignore
+        return SDS7404(self.host, timeout_ms=self.timeout_ms)
 
     def run(self) -> None:
         try:
-            ensure_sds7404_importable()
-            from sds7404 import SDS7404  # type: ignore
-
-            self.progress.emit(f"Connecting to {self.host} …")
-            with SDS7404(self.host, timeout_ms=self.timeout_ms) as scope:
+            with self._open_scope() as scope:
                 idn = scope.idn()
                 self.progress.emit(f"Connected: {idn}")
                 if self.send_single:
@@ -73,6 +85,10 @@ class AcquireWorker(QThread):
                 channels = [self.ch1] + ([self.ch2] if self.ch2 else [])
                 self.progress.emit(f"Reading channels {channels} …")
                 frame = scope.read_channels(channels)
+                if self.resume:
+                    # Resume live acquisition so the operator keeps seeing the
+                    # signal after the one-shot grab.
+                    scope.run()
             self.finished_ok.emit((frame, self.ch1, self.ch2))
         except Exception as exc:  # noqa: BLE001
             self.finished_err.emit(f"{type(exc).__name__}: {exc}")

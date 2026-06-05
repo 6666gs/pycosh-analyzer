@@ -24,6 +24,7 @@ extraction (Lorentzian + β-separation), and MZI FSR self-calibration.
 | **Lorentzian floor fit** | Minimum of S<sub>ν</sub>(f) over a chosen high-offset band → FWHM<sub>L</sub> = π · S<sub>0</sub> (single-sideband) |
 | **β-separation line + integration** | Di Domenico 2010 method — overlay β-line and report the Gaussian FWHM from the area above it |
 | **CSV export** | One click writes **both** frequency- and phase-noise spectra (all traces + error columns) to a single CSV with a full metadata header (delay, FSR, AOM, segments, linewidth fits) |
+| **Live monitoring** | After Acquire the scope resumes live; "▶ Monitor (live)" repeatedly acquires + processes single-shot frames, updating the spectrum and a Lorentz-linewidth-vs-time trend to watch laser lock stability |
 
 ---
 
@@ -120,9 +121,10 @@ not before, so a clean clone always works out of the box.
 1. Sidebar → **Data** → mode `Acquire from oscilloscope (SDS7404)`
 2. Set scope IP, BPD1 channel (default **C2**), BPD2 channel (default **C4**)
 3. ✓ *Send SINGle trigger before reading* if you want a fresh acquisition; uncheck to read whatever frame is on screen
-4. ⏺ **Acquire from scope** → background QThread pulls the frame, no UI freeze
+4. ⏺ **Acquire from scope** → background QThread pulls the frame (the scope resumes live acquisition automatically afterwards), no UI freeze
 5. (Optional) **Save acquired CSV…** to keep the raw record
 6. Proceed from step 3 of Mode A
+7. **▶ Monitor (live)** (after one Acquire has calibrated the FSR) repeatedly grabs a fresh single-shot frame and re-processes it, updating the spectrum and the **Lorentz FWHM vs time** trend strip below the plot — use it to confirm a self-lock laser stays locked. **■ Stop monitoring** ends the loop after the current frame.
 
 ---
 

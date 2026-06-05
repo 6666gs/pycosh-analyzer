@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import datetime as dt
+from collections import deque
 from pathlib import Path
 
 from PySide6.QtWidgets import (
@@ -10,6 +11,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QStatusBar,
+    QVBoxLayout,
     QWidget,
 )
 
@@ -23,13 +25,14 @@ from .data_io import (
     save_dual_bpd_csv,
 )
 from .mzi_calibrate import MziResult
-from .plot_widget import DisplayOptions, SpectrumPlot, _format_hz
+from .plot_widget import DisplayOptions, SpectrumPlot, TrendPlot, _format_hz
 from .processor import (
     CalibrateWorker,
     ProcessRequest,
     ProcessResult,
     ProcessWorker,
 )
+from .monitor import MonitorRequest, MonitorWorker
 from .scope import AcquireWorker, frame_to_arrays
 from .settings_panel import (
     MODE_ACQUIRE,
@@ -54,6 +57,9 @@ class MainWindow(QMainWindow):
         self._proc_worker: ProcessWorker | None = None
         self._cal_worker: CalibrateWorker | None = None
         self._acq_worker: AcquireWorker | None = None
+        self._monitor_worker: MonitorWorker | None = None
+        self._trend_t: deque[float] = deque(maxlen=1000)
+        self._trend_fwhm: deque[float] = deque(maxlen=1000)
         # Whether the calibration currently running was launched by an
         # explicit user click (True) or automatically on data load (False).
         # Used to decide whether failure popups appear.
@@ -61,13 +67,22 @@ class MainWindow(QMainWindow):
 
         self.settings = SettingsPanel()
         self.plot = SpectrumPlot()
+        self.trend = TrendPlot()
+        self.trend.setVisible(False)
+
+        plot_container = QWidget()
+        plot_col = QVBoxLayout(plot_container)
+        plot_col.setContentsMargins(0, 0, 0, 0)
+        plot_col.setSpacing(0)
+        plot_col.addWidget(self.plot, 1)
+        plot_col.addWidget(self.trend)
 
         central = QWidget()
         layout = QHBoxLayout(central)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         layout.addWidget(self.settings)
-        layout.addWidget(self.plot, 1)
+        layout.addWidget(plot_container, 1)
         self.setCentralWidget(central)
 
         self.setStatusBar(QStatusBar())
@@ -84,6 +99,8 @@ class MainWindow(QMainWindow):
         )
         self.settings.acquireRequested.connect(self._start_acquire)
         self.settings.saveAcquiredRequested.connect(self._save_acquired)
+        self.settings.monitorStartRequested.connect(self._start_monitor)
+        self.settings.monitorStopRequested.connect(self._stop_monitor)
 
     # ---------- data loading ----------
 
@@ -270,6 +287,95 @@ class MainWindow(QMainWindow):
         self.settings.set_processing(False)
         self.statusBar().showMessage("Processing failed.")
         QMessageBox.critical(self, "Processing failed", message)
+
+    # ---------- live monitoring ----------
+
+    def _start_monitor(self) -> None:
+        if self._data is None or not self.settings.optical.is_calibrated:
+            QMessageBox.warning(
+                self, "Not ready",
+                "Acquire once to calibrate the FSR before starting live "
+                "monitoring.",
+            )
+            return
+        if self.settings.data.mode != MODE_ACQUIRE:
+            QMessageBox.warning(self, "Acquire mode only",
+                                "Live monitoring needs the oscilloscope mode.")
+            return
+        try:
+            snap = self.settings.snapshot()
+        except ValueError as exc:
+            QMessageBox.warning(self, "Invalid settings", str(exc))
+            return
+
+        req = MonitorRequest(
+            host=self.settings.data.scope_host,
+            ch1=self.settings.data.scope_ch1_name,
+            ch2=self.settings.data.scope_ch2_name,
+            send_single=True,
+            delay_freq=snap.delay_freq_hz,
+            bw_segment=snap.bw_segment_hz,
+            offset_start_ratio=snap.offset_start_ratio,
+            range_start=snap.range_start,
+            range_stop=snap.range_stop,
+        )
+
+        self._trend_t.clear()
+        self._trend_fwhm.clear()
+        self.trend.clear()
+        self.trend.setVisible(True)
+        self.settings.set_monitoring(True)
+        self.statusBar().showMessage("Live monitoring started…")
+
+        self._monitor_worker = MonitorWorker(req)
+        self._monitor_worker.progress.connect(self.statusBar().showMessage)
+        self._monitor_worker.cycle_done.connect(self._on_monitor_cycle)
+        self._monitor_worker.finished_err.connect(self._on_monitor_err)
+        self._monitor_worker.finished.connect(self._on_monitor_finished)
+        self._monitor_worker.finished.connect(self._monitor_worker.deleteLater)
+        self._monitor_worker.start()
+
+    def _on_monitor_cycle(self, result: ProcessResult, elapsed: float) -> None:
+        self._result = result
+        self.settings.set_export_enabled(True)  # latest frame is exportable once stopped
+
+        fwhm = float("nan")
+        try:
+            snap = self.settings.snapshot()
+        except ValueError:
+            snap = None
+        if snap is not None:
+            lz = fit_lorentz_floor(result.freq, result.s_nu_12,
+                                   f_min=snap.lorentz_f_min,
+                                   f_max=snap.lorentz_f_max)
+            if lz is not None:
+                fwhm = lz.fwhm_hz
+
+        self._trend_t.append(elapsed)
+        self._trend_fwhm.append(fwhm)
+        self.trend.update_trend(list(self._trend_t), list(self._trend_fwhm))
+        self._redraw()
+
+        shown = _format_hz(fwhm) if fwhm == fwhm else "—"   # NaN check
+        self.statusBar().showMessage(
+            f"Monitoring… {len(self._trend_t)} frames · last FWHM = {shown}"
+        )
+
+    def _stop_monitor(self) -> None:
+        if self._monitor_worker is not None:
+            self.statusBar().showMessage("Stopping after current frame…")
+            self._monitor_worker.request_stop()
+
+    def _on_monitor_finished(self) -> None:
+        self._monitor_worker = None
+        self.settings.set_monitoring(False)
+        self.statusBar().showMessage(
+            f"Monitoring stopped. {len(self._trend_t)} frames captured."
+        )
+
+    def _on_monitor_err(self, message: str) -> None:
+        self.statusBar().showMessage("Monitoring failed.")
+        QMessageBox.critical(self, "Monitoring failed", message)
 
     # ---------- display + analysis ----------
 

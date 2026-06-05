@@ -134,7 +134,11 @@ class SDS7404:
         self._scope.write(":TRIGger:STOP")
         time.sleep(SETTLE_AFTER_STOP_S)
 
-    def run(self) -> None:
+    def run(self, continuous: bool = True) -> None:
+        """恢复采集。continuous=True 时先切回 AUTO 触发模式，保证屏幕持续刷新
+        (single() 会把模式设成 SINGle，读完后若不切回就停在单次态)。"""
+        if continuous:
+            self._scope.write(":TRIGger:MODE AUTO")
         self._scope.write(":TRIGger:RUN")
 
     def single(self) -> None:

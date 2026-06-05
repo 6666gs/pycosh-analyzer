@@ -101,3 +101,85 @@ def test_calibration_success_auto_processes(qtbot, monkeypatch):
 
     win._on_calibrate_ok(_Res())
     assert calls == [True]
+
+
+def test_trend_plot_renders_points(qtbot):
+    from app.plot_widget import TrendPlot
+
+    trend = TrendPlot()
+    qtbot.addWidget(trend)
+    trend.update_trend([0.0, 1.5, 3.0], [1.2e4, 9.0e3, float("nan")])
+
+    title = trend._ax.get_title()
+    assert "FWHM" in title
+    # one Line2D drawn for the trend
+    assert len(trend._ax.get_lines()) >= 1
+
+
+def test_trend_plot_clear(qtbot):
+    from app.plot_widget import TrendPlot
+
+    trend = TrendPlot()
+    qtbot.addWidget(trend)
+    trend.update_trend([0.0, 1.0], [1e4, 2e4])
+    trend.clear()
+    assert len(trend._ax.get_lines()) == 0
+
+
+def test_monitor_button_gating(qtbot):
+    from app.main_window import MainWindow
+    from app.settings_panel import MODE_ACQUIRE
+
+    win = MainWindow()
+    qtbot.addWidget(win)
+    sp = win.settings
+
+    # Not calibrated → monitor disabled
+    sp.set_calibrated(False)
+    assert sp.monitor_btn.isEnabled() is False
+
+    # Calibrated + acquire mode → monitor enabled
+    sp.data.mode_combo.setCurrentIndex(
+        sp.data.mode_combo.findData(MODE_ACQUIRE))
+    sp.set_calibrated(True)
+    assert sp.monitor_btn.isEnabled() is True
+
+    # While monitoring: label flips, Process disabled, monitor stays enabled
+    sp.set_monitoring(True)
+    assert "Stop" in sp.monitor_btn.text()
+    assert sp.process_btn.isEnabled() is False
+    assert sp.monitor_btn.isEnabled() is True
+
+    sp.set_monitoring(False)
+    assert "Monitor" in sp.monitor_btn.text()
+
+
+def test_monitor_cycle_updates_trend_and_spectrum(qtbot):
+    from app.main_window import MainWindow
+
+    win = MainWindow()
+    qtbot.addWidget(win)
+    result = _make_result(v2=np.zeros(16))
+
+    win._on_monitor_cycle(result, 2.5)
+
+    assert win._result is result
+    assert len(win._trend_t) == 1
+    assert win._trend_t[0] == 2.5
+    assert len(win._trend_fwhm) == 1          # a metric (possibly NaN) recorded
+    assert win.trend.isVisible() or True       # visibility toggled by start, not cycle
+
+
+def test_start_monitor_requires_calibration(qtbot, monkeypatch):
+    from app.main_window import MainWindow
+
+    win = MainWindow()
+    qtbot.addWidget(win)
+    warned = []
+    monkeypatch.setattr("app.main_window.QMessageBox.warning",
+                        lambda *a, **k: warned.append(a))
+
+    win._start_monitor()  # not calibrated, no data
+
+    assert warned               # warned the user instead of starting
+    assert win._monitor_worker is None

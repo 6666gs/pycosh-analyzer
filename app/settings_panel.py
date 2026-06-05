@@ -676,6 +676,8 @@ class SettingsPanel(QWidget):
     calibrateRequested = Signal()
     acquireRequested = Signal()
     saveAcquiredRequested = Signal()
+    monitorStartRequested = Signal()
+    monitorStopRequested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -716,6 +718,11 @@ class SettingsPanel(QWidget):
 
         self.export_btn = _secondary_btn("Export spectra…")
         self.export_btn.setEnabled(False)
+        self._can_export: bool = False
+
+        self.monitor_btn = _secondary_btn("▶  Monitor (live)")
+        self.monitor_btn.setEnabled(False)
+        self._monitoring: bool = False
 
         # forward signals
         self.data.fileChanged.connect(self.fileChanged.emit)
@@ -726,6 +733,9 @@ class SettingsPanel(QWidget):
         self.optical.calibrateRequested.connect(self.calibrateRequested.emit)
         self.process_btn.clicked.connect(self.processRequested.emit)
         self.export_btn.clicked.connect(self.exportRequested.emit)
+        self.monitor_btn.clicked.connect(self._on_monitor_clicked)
+        # Mode changes (emitted via data.fileChanged) re-evaluate monitor gating.
+        self.data.fileChanged.connect(self._refresh_monitor_btn)
 
         # Sections live in a vertical-scroll-only container. We never
         # want the sidebar to scroll horizontally — when the user shrinks
@@ -767,6 +777,7 @@ class SettingsPanel(QWidget):
         btn_layout.setContentsMargins(16, 10, 16, 12)
         btn_layout.setSpacing(8)
         btn_layout.addWidget(self.process_btn)
+        btn_layout.addWidget(self.monitor_btn)
         btn_layout.addWidget(self.export_btn)
 
         layout = QVBoxLayout(self)
@@ -776,20 +787,48 @@ class SettingsPanel(QWidget):
         layout.addWidget(button_row)
 
     def set_export_enabled(self, enabled: bool) -> None:
-        self.export_btn.setEnabled(enabled)
+        self._can_export = enabled
+        self.export_btn.setEnabled(enabled and not self._monitoring)
 
     def set_processing(self, busy: bool) -> None:
         self._busy = busy
         self.process_btn.setText("Processing…" if busy else "▶  Process")
         self._refresh_process_btn()
+        self._refresh_monitor_btn()
 
     def set_calibrated(self, calibrated: bool) -> None:
         """Called by MainWindow after auto-cal succeeds/fails."""
         self._calibrated = calibrated
         self._refresh_process_btn()
+        self._refresh_monitor_btn()
 
     def _refresh_process_btn(self) -> None:
-        self.process_btn.setEnabled(self._calibrated and not self._busy)
+        self.process_btn.setEnabled(
+            self._calibrated and not self._busy and not self._monitoring
+        )
+
+    def _on_monitor_clicked(self) -> None:
+        if self._monitoring:
+            self.monitorStopRequested.emit()
+        else:
+            self.monitorStartRequested.emit()
+
+    def _refresh_monitor_btn(self) -> None:
+        can_start = (self._calibrated and not self._busy
+                     and self.data.mode == MODE_ACQUIRE)
+        self.monitor_btn.setEnabled(self._monitoring or can_start)
+
+    def set_monitoring(self, monitoring: bool) -> None:
+        """Lock conflicting controls while the live loop runs."""
+        self._monitoring = monitoring
+        self.monitor_btn.setText(
+            "■  Stop monitoring" if monitoring else "▶  Monitor (live)"
+        )
+        self.data.mode_combo.setEnabled(not monitoring)
+        self.data.acquire_btn.setEnabled(not monitoring)
+        self.export_btn.setEnabled(self._can_export and not monitoring)
+        self._refresh_process_btn()
+        self._refresh_monitor_btn()
 
     def set_acquiring(self, busy: bool) -> None:
         self.data.acquire_btn.setEnabled(not busy)

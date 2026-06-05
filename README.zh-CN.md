@@ -22,6 +22,7 @@ Apple 浅色风格，跨平台（macOS / Windows / Linux），支持示波器实
 | **Lorentzian 底拟合** | 在指定高偏置带内取 S<sub>ν</sub>(f) 的最小值 → FWHM<sub>L</sub> = π · S<sub>0</sub>（单边谱） |
 | **β-separation 线 + 积分** | Di Domenico 2010 方法 —— 叠加 β 线并由其上方面积报告高斯 FWHM |
 | **CSV 导出** | 一键将频率与相位噪声谱（全部曲线 + 误差列）同时写入单个 CSV，含完整元数据头（延迟、FSR、AOM、分段、线宽拟合） |
+| **实时监测** | Acquire 后示波器自动恢复 live；点"▶ Monitor (live)"反复采集+处理单次帧，实时刷新噪声谱与 Lorentz 线宽-时间趋势，用于观察激光器锁定是否稳定 |
 
 ---
 
@@ -114,9 +115,10 @@ export DBPD_SDS7404_PARENT=/path/to/folder-containing-sds7404
 1. 侧栏 → **Data** → 模式 `Acquire from oscilloscope (SDS7404)`
 2. 设置示波器 IP、BPD1 通道（默认 **C2**）、BPD2 通道（默认 **C4**）
 3. ✓ 勾选 *Send SINGle trigger before reading* 触发新一次采集；不勾则直接读屏上当前帧
-4. ⏺ **Acquire from scope** → 后台 QThread 拉取数据，UI 不卡死
+4. ⏺ **Acquire from scope** → 后台 QThread 拉取数据，UI 不卡死（采集完毕后示波器自动恢复 live 模式）
 5. （可选）**Save acquired CSV…** 把原始波形落盘
 6. 接续模式 A 的第 3 步
+7. **▶ Monitor (live)**（先 Acquire 一次完成 FSR 校准后）会反复抓取新的单次帧并重新处理，实时刷新噪声谱与下方的 **Lorentz 线宽 vs 时间** 趋势条，用于确认 self-lock 激光器是否保持锁定。**■ Stop monitoring** 在当前帧结束后停止。
 
 ---
 

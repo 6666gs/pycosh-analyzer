@@ -44,3 +44,35 @@ def test_driver_run_continuous_sets_auto_then_run():
     assert ":TRIGger:RUN" in rm.instr.writes
     # AUTO must be set before RUN
     assert rm.instr.writes.index(":TRIGger:MODE AUTO") < rm.instr.writes.index(":TRIGger:RUN")
+
+
+def test_acquire_worker_resumes_scope_after_read(qtbot):
+    from app.scope import AcquireWorker
+
+    factory = FakeScopeFactory()
+    worker = AcquireWorker("1.2.3.4", "C1", "C2", send_single=False,
+                           scope_factory=factory)
+    payloads = []
+    worker.finished_ok.connect(lambda p: payloads.append(p))
+
+    worker.run()  # run synchronously in this thread for a deterministic test
+
+    scope = factory.last
+    assert scope is not None
+    # read happened, then live acquisition resumed before the connection closed
+    assert ("read_channels", ("C1", "C2")) in scope.calls
+    assert any(isinstance(c, str) and c.startswith("run(") for c in scope.calls)
+    assert scope.calls.index(("read_channels", ("C1", "C2"))) < \
+        [i for i, c in enumerate(scope.calls) if isinstance(c, str) and c.startswith("run(")][0]
+    assert len(payloads) == 1  # finished_ok emitted
+
+
+def test_acquire_worker_resume_false_skips_run(qtbot):
+    from app.scope import AcquireWorker
+
+    factory = FakeScopeFactory()
+    worker = AcquireWorker("1.2.3.4", "C1", "C2", send_single=False,
+                           resume=False, scope_factory=factory)
+    worker.run()
+
+    assert not any(isinstance(c, str) and c.startswith("run(") for c in factory.last.calls)

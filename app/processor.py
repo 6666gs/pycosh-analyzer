@@ -104,6 +104,45 @@ class ProcessResult:
         return self.s_nu_12_err / self.freq**2
 
 
+def run_cosh(request: ProcessRequest, progress=None) -> ProcessResult:
+    """Run pycosh's CoshXcorr for one request and build a ProcessResult.
+
+    Pure (no Qt). Shared by ProcessWorker and MonitorWorker. `progress` is an
+    optional callable(str) for status messages.
+    """
+    def _say(msg: str) -> None:
+        if progress is not None:
+            progress(msg)
+
+    ensure_pycosh_importable()
+    from pycosh import CoshConfig, CoshXcorr  # type: ignore
+
+    _say("Configuring pycosh …")
+    cfg = CoshConfig(
+        delay_freq=request.delay_freq,
+        bw_segment=list(request.bw_segment),
+        sample_rate=request.sample_rate,
+        offset_start_ratio=request.offset_start_ratio,
+        range_start=request.range_start,
+        range_stop=request.range_stop,
+    )
+    trace2 = request.v2 if request.v2 is not None else request.v1
+    cosh = CoshXcorr(trace1=request.v1, trace2=trace2, config=cfg)
+    _say("Running Hilbert + multi-band FFT …")
+    cosh.process(print_progress=False)
+    return ProcessResult(
+        freq=np.asarray(cosh.freq_list),
+        gfilter=np.asarray(cosh.freq_filter),
+        psd11=np.asarray(cosh.psd11),
+        psd11_err=np.asarray(cosh.psd11_err),
+        psd22=np.asarray(cosh.psd22),
+        psd22_err=np.asarray(cosh.psd22_err),
+        psd12=np.asarray(cosh.psd12),
+        psd12_err=np.asarray(cosh.psd12_err),
+        request=request,
+    )
+
+
 class ProcessWorker(QThread):
     """Runs CoshXcorr.process() off the main thread."""
     progress = Signal(str)
@@ -116,34 +155,7 @@ class ProcessWorker(QThread):
 
     def run(self) -> None:
         try:
-            ensure_pycosh_importable()
-            from pycosh import CoshConfig, CoshXcorr  # type: ignore
-
-            req = self._req
-            self.progress.emit("Configuring pycosh …")
-            cfg = CoshConfig(
-                delay_freq=req.delay_freq,
-                bw_segment=list(req.bw_segment),
-                sample_rate=req.sample_rate,
-                offset_start_ratio=req.offset_start_ratio,
-                range_start=req.range_start,
-                range_stop=req.range_stop,
-            )
-            trace2 = req.v2 if req.v2 is not None else req.v1
-            cosh = CoshXcorr(trace1=req.v1, trace2=trace2, config=cfg)
-            self.progress.emit("Running Hilbert + multi-band FFT …")
-            cosh.process(print_progress=False)
-            result = ProcessResult(
-                freq=np.asarray(cosh.freq_list),
-                gfilter=np.asarray(cosh.freq_filter),
-                psd11=np.asarray(cosh.psd11),
-                psd11_err=np.asarray(cosh.psd11_err),
-                psd22=np.asarray(cosh.psd22),
-                psd22_err=np.asarray(cosh.psd22_err),
-                psd12=np.asarray(cosh.psd12),
-                psd12_err=np.asarray(cosh.psd12_err),
-                request=req,
-            )
+            result = run_cosh(self._req, progress=self.progress.emit)
             self.finished_ok.emit(result)
         except Exception as exc:  # noqa: BLE001
             self.finished_err.emit(f"{type(exc).__name__}: {exc}")

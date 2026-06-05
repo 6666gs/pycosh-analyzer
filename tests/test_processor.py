@@ -57,3 +57,26 @@ def test_s_phi_is_s_nu_over_f_squared_and_keeps_ssb_factor():
     np.testing.assert_allclose(
         r.s_phi_12, SSB_FACTOR * np.abs(r.psd12) / r.gfilter / r.freq**2
     )
+
+
+from conftest import synthetic_beat
+
+
+def test_run_cosh_end_to_end_applies_ssb_factor():
+    from app.processor import ProcessRequest, run_cosh
+
+    _, v1, v2, sr = synthetic_beat()
+    req = ProcessRequest(
+        v1=v1, v2=v2, sample_rate=sr,
+        delay_freq=1e5, bw_segment=(1e3, 1e4),
+        offset_start_ratio=10, range_start=None, range_stop=None,
+    )
+
+    result = run_cosh(req)
+
+    assert result.freq.size > 0
+    assert result.s_nu_12.shape == result.freq.shape
+    # single-sideband factor flows through the real pipeline
+    np.testing.assert_allclose(
+        result.s_nu_12, SSB_FACTOR * np.abs(result.psd12) / result.gfilter
+    )

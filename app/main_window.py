@@ -33,6 +33,7 @@ from .processor import (
     ProcessWorker,
 )
 from .monitor import MonitorRequest, MonitorWorker
+from .monitor_io import MonitorRecorder
 from .scope import AcquireWorker, TestConnectionWorker, frame_to_arrays
 from .settings_panel import (
     MODE_ACQUIRE,
@@ -70,6 +71,7 @@ class MainWindow(QMainWindow):
         self._acq_worker: AcquireWorker | None = None
         self._conn_worker: TestConnectionWorker | None = None
         self._monitor_worker: MonitorWorker | None = None
+        self._monitor_recorder: MonitorRecorder | None = None
         self._trend_t: deque[float] = deque(maxlen=1000)
         self._trend_fwhm: deque[float] = deque(maxlen=1000)
         # Whether the calibration currently running was launched by an
@@ -371,6 +373,22 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Invalid settings", str(exc))
             return
 
+        # If "Save" is ticked, choose the output folder up front. Cancelling
+        # the dialog aborts the start (the user asked to save).
+        recorder = None
+        if self.settings.save_monitor_enabled:
+            directory = QFileDialog.getExistingDirectory(
+                self, "Choose a folder to save monitoring data")
+            if not directory:
+                self.statusBar().showMessage("Monitoring cancelled (no folder chosen).")
+                return
+            try:
+                recorder = MonitorRecorder(directory)
+            except OSError as exc:
+                QMessageBox.critical(self, "Cannot save here", str(exc))
+                return
+        self._monitor_recorder = recorder
+
         req = MonitorRequest(
             host=self.settings.data.scope_host,
             ch1=self.settings.data.scope_ch1_name,
@@ -402,7 +420,8 @@ class MainWindow(QMainWindow):
         self._result = result
         self.settings.set_export_enabled(True)  # latest frame is exportable once stopped
 
-        fwhm = float("nan")
+        lorentz_fwhm = None
+        beta_fwhm = None
         try:
             snap = self.settings.snapshot()
         except ValueError:
@@ -412,16 +431,35 @@ class MainWindow(QMainWindow):
                                    f_min=snap.lorentz_f_min,
                                    f_max=snap.lorentz_f_max)
             if lz is not None:
-                fwhm = lz.fwhm_hz
+                lorentz_fwhm = lz.fwhm_hz
+            beta = integrate_beta(result.freq, result.s_nu_12,
+                                  f_min=snap.beta_f_min,
+                                  f_max=snap.beta_f_max)
+            if beta is not None:
+                beta_fwhm = beta.fwhm_gauss_hz
 
         self._trend_t.append(elapsed)
-        self._trend_fwhm.append(fwhm)
+        self._trend_fwhm.append(
+            lorentz_fwhm if lorentz_fwhm is not None else float("nan"))
         self.trend.update_trend(list(self._trend_t), list(self._trend_fwhm))
+
+        # Persist this cycle's spectrum + the Lorentz/β trend if enabled.
+        saved_note = ""
+        if self._monitor_recorder is not None:
+            try:
+                self._monitor_recorder.record(
+                    result, elapsed, lorentz_fwhm, beta_fwhm,
+                    stamp=dt.datetime.now().strftime("%H%M%S"),
+                )
+                saved_note = f" · saved {self._monitor_recorder.count}"
+            except Exception as exc:  # noqa: BLE001
+                saved_note = f" · save failed: {exc}"
+
         self._redraw()
 
-        shown = _format_hz(fwhm) if fwhm == fwhm else "—"   # NaN check
+        shown = _format_hz(lorentz_fwhm) if lorentz_fwhm is not None else "—"
         self.statusBar().showMessage(
-            f"Monitoring… {len(self._trend_t)} frames · last FWHM = {shown}"
+            f"Monitoring… {len(self._trend_t)} frames · last FWHM = {shown}{saved_note}"
         )
 
     def _stop_monitor(self) -> None:

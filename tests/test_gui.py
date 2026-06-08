@@ -183,3 +183,60 @@ def test_start_monitor_requires_calibration(qtbot, monkeypatch):
 
     assert warned               # warned the user instead of starting
     assert win._monitor_worker is None
+
+
+def _ready_to_monitor(win):
+    """Put a MainWindow into a state where _start_monitor would proceed."""
+    import numpy as np
+
+    from app.data_io import DualBpdData
+    from app.settings_panel import MODE_ACQUIRE
+
+    t = np.arange(64) / 1e6
+    win._data = DualBpdData(t=t, v1=np.sin(t), v2=np.cos(t),
+                            sample_rate=1e6, source_files=())
+    win.settings.optical.apply_calibrated_fsr(2e5)
+    sp = win.settings
+    sp.data.mode_combo.setCurrentIndex(sp.data.mode_combo.findData(MODE_ACQUIRE))
+
+
+def test_save_checkbox_drives_save_monitor_enabled(qtbot):
+    from app.main_window import MainWindow
+
+    win = MainWindow()
+    qtbot.addWidget(win)
+    assert win.settings.save_monitor_enabled is False
+    win.settings.save_monitor_check.setChecked(True)
+    assert win.settings.save_monitor_enabled is True
+
+
+def test_start_monitor_aborts_when_save_dir_cancelled(qtbot, monkeypatch):
+    from app.main_window import MainWindow
+
+    win = MainWindow()
+    qtbot.addWidget(win)
+    _ready_to_monitor(win)
+    win.settings.save_monitor_check.setChecked(True)
+    # User cancels the folder picker.
+    monkeypatch.setattr("app.main_window.QFileDialog.getExistingDirectory",
+                        lambda *a, **k: "")
+
+    win._start_monitor()
+
+    assert win._monitor_worker is None      # never started
+    assert win._monitor_recorder is None
+
+
+def test_monitor_cycle_saves_when_recorder_active(qtbot, tmp_path):
+    from app.main_window import MainWindow
+    from app.monitor_io import MonitorRecorder
+
+    win = MainWindow()
+    qtbot.addWidget(win)
+    win._monitor_recorder = MonitorRecorder(tmp_path)
+
+    win._on_monitor_cycle(_make_result(v2=np.zeros(16)), 2.0)
+
+    assert win._monitor_recorder.count == 1
+    assert (tmp_path / "trend_lorentz_beta.npz").exists()
+    assert len(list(tmp_path.glob("spectrum_*.npz"))) == 1

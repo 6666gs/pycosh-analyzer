@@ -854,6 +854,14 @@ class SettingsPanel(QWidget):
         self.monitor_btn.setEnabled(False)
         self._monitoring: bool = False
 
+        # When checked, starting Monitor first asks for a folder and then
+        # auto-saves every cycle's spectrum (.npz) plus the Lorentz/β trend.
+        self.save_monitor_check = QCheckBox("Save")
+        self.save_monitor_check.setToolTip(
+            "Save each monitoring cycle's noise spectrum (.npz) and the "
+            "Lorentz/β trend to a chosen folder."
+        )
+
         # forward signals
         self.data.fileChanged.connect(self.fileChanged.emit)
         self.data.acquireRequested.connect(self.acquireRequested.emit)
@@ -908,7 +916,12 @@ class SettingsPanel(QWidget):
         btn_layout.setContentsMargins(16, 10, 16, 12)
         btn_layout.setSpacing(8)
         btn_layout.addWidget(self.process_btn)
-        btn_layout.addWidget(self.monitor_btn)
+        monitor_row = QHBoxLayout()
+        monitor_row.setSpacing(8)
+        monitor_row.setContentsMargins(0, 0, 0, 0)
+        monitor_row.addWidget(self.monitor_btn, 1)
+        monitor_row.addWidget(self.save_monitor_check)
+        btn_layout.addLayout(monitor_row)
         btn_layout.addWidget(self.export_btn)
 
         layout = QVBoxLayout(self)
@@ -916,6 +929,10 @@ class SettingsPanel(QWidget):
         layout.setSpacing(0)
         layout.addWidget(scroll, 1)
         layout.addWidget(button_row)
+
+    @property
+    def save_monitor_enabled(self) -> bool:
+        return self.save_monitor_check.isChecked()
 
     def set_export_enabled(self, enabled: bool) -> None:
         self._can_export = enabled
@@ -957,6 +974,7 @@ class SettingsPanel(QWidget):
         )
         self.data.mode_combo.setEnabled(not monitoring)
         self.data.acquire_btn.setEnabled(not monitoring)
+        self.save_monitor_check.setEnabled(not monitoring)
         self.export_btn.setEnabled(self._can_export and not monitoring)
         self._refresh_process_btn()
         self._refresh_monitor_btn()

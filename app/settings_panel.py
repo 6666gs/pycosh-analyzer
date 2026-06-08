@@ -6,6 +6,8 @@ from enum import Enum, auto
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
+
+from .data_io import is_data_path
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -28,6 +30,36 @@ from PySide6.QtWidgets import (
 
 C_LIGHT = 299_792_458.0
 
+
+# ---------- accidental-scroll-proof input widgets ----------
+# Spin boxes and combos eat wheel events by default, so scrolling the sidebar
+# over one silently changes its value. These variants ignore the wheel unless
+# the widget is focused (click first), letting the scroll reach the panel.
+
+class _NoWheelMixin:
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.setFocusPolicy(Qt.StrongFocus)
+
+    def wheelEvent(self, event) -> None:  # noqa: N802 (Qt override name)
+        if self.hasFocus():
+            super().wheelEvent(event)
+        else:
+            event.ignore()
+
+
+class NoWheelDoubleSpinBox(_NoWheelMixin, QDoubleSpinBox):
+    pass
+
+
+class NoWheelSpinBox(_NoWheelMixin, QSpinBox):
+    pass
+
+
+class NoWheelComboBox(_NoWheelMixin, QComboBox):
+    pass
+
+
 SCOPE_CHANNELS = ("C1", "C2", "C3", "C4")
 NONE_CH_LABEL = "(none)"
 
@@ -36,8 +68,8 @@ MODE_SINGLE_CSV = "single_csv"
 MODE_TWO_CSV = "two_csv"
 MODE_ACQUIRE = "acquire"
 MODE_LABELS = {
-    MODE_SINGLE_CSV: "Single CSV (3 columns: t, BPD1, BPD2)",
-    MODE_TWO_CSV: "Two CSVs (one per channel)",
+    MODE_SINGLE_CSV: "Single file (3 columns: t, BPD1, BPD2)",
+    MODE_TWO_CSV: "Two files (one per channel)",
     MODE_ACQUIRE: "Acquire from oscilloscope (SDS7404)",
 }
 
@@ -138,10 +170,20 @@ class SettingsSnapshot:
 
 # ---------- Data section ----------
 
+# Scope connection-indicator states → (dot colour, label text).
+CONN_STATES = {
+    "idle":    ("#8E8E93", "Not tested"),
+    "testing": ("#FF9F0A", "Testing…"),
+    "ok":      ("#34C759", "Connected"),
+    "fail":    ("#FF3B30", "No connection"),
+}
+
+
 class DataSection(QFrame):
     fileChanged = Signal()
     acquireRequested = Signal()
     saveAcquiredRequested = Signal()
+    testConnectionRequested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -151,7 +193,7 @@ class DataSection(QFrame):
         self._has_acquired: bool = False
 
         # Mode selector
-        self.mode_combo = QComboBox()
+        self.mode_combo = NoWheelComboBox()
         for key in (MODE_SINGLE_CSV, MODE_TWO_CSV, MODE_ACQUIRE):
             self.mode_combo.addItem(MODE_LABELS[key], userData=key)
         self.mode_combo.currentIndexChanged.connect(self._update_mode)
@@ -159,7 +201,7 @@ class DataSection(QFrame):
 
         # --- File-mode widgets ---
         self.file1_edit = QLineEdit()
-        self.file1_edit.setPlaceholderText("BPD1 / dual CSV path…")
+        self.file1_edit.setPlaceholderText("BPD1 / dual data file (csv/npy/npz)…")
         self.file1_edit.setReadOnly(True)
         _shrinkable(self.file1_edit)
         self.file1_btn = _secondary_btn("Browse")
@@ -189,12 +231,12 @@ class DataSection(QFrame):
         self.scope_ip.setPlaceholderText("IP or hostname")
         _shrinkable(self.scope_ip)
 
-        self.scope_ch1 = QComboBox()
+        self.scope_ch1 = NoWheelComboBox()
         for ch in SCOPE_CHANNELS:
             self.scope_ch1.addItem(ch)
         self.scope_ch1.setCurrentText("C2")
 
-        self.scope_ch2 = QComboBox()
+        self.scope_ch2 = NoWheelComboBox()
         for ch in SCOPE_CHANNELS:
             self.scope_ch2.addItem(ch)
         self.scope_ch2.addItem(NONE_CH_LABEL)
@@ -202,11 +244,19 @@ class DataSection(QFrame):
 
         self.scope_single = QCheckBox("Send SINGle trigger first")
 
+        # Connection test: a button + a coloured status light (green/red).
+        self.test_conn_btn = _secondary_btn("Test connection")
+        self.test_conn_btn.clicked.connect(self.testConnectionRequested.emit)
+        self.conn_status = QLabel()
+        self.conn_status.setTextFormat(Qt.RichText)
+        self._conn_state = "idle"
+        self.set_connection_status("idle")
+
         self.acquire_btn = QPushButton("⏺  Acquire from scope")
         self.acquire_btn.setProperty("variant", "secondary")
         self.acquire_btn.clicked.connect(self.acquireRequested.emit)
 
-        self.save_acquired_btn = _secondary_btn("Save acquired CSV…")
+        self.save_acquired_btn = _secondary_btn("Save acquired (CSV/npy)…")
         self.save_acquired_btn.setEnabled(False)
         self.save_acquired_btn.clicked.connect(self.saveAcquiredRequested.emit)
 
@@ -218,6 +268,12 @@ class DataSection(QFrame):
         scope_form.addRow("BPD1 channel", self.scope_ch1)
         scope_form.addRow("BPD2 channel", self.scope_ch2)
         scope_form.addRow("", self.scope_single)
+        conn_row = QHBoxLayout()
+        conn_row.setSpacing(8)
+        conn_row.setContentsMargins(0, 0, 0, 0)
+        conn_row.addWidget(self.test_conn_btn)
+        conn_row.addWidget(self.conn_status, 1)
+        scope_form.addRow("", self._row_widget(conn_row))
         # Stack the two action buttons vertically: side-by-side they would
         # force a minimum row width that overflows the sidebar (the
         # QStackedWidget reserves the wider page's sizeHint for both modes).
@@ -280,11 +336,32 @@ class DataSection(QFrame):
     def set_info(self, text: str) -> None:
         self.info_label.setText(text)
 
+    @property
+    def connection_state(self) -> str:
+        return self._conn_state
+
+    def set_connection_status(self, state: str, detail: str = "") -> None:
+        """Update the scope connection light. ``state`` is one of
+        ``idle / testing / ok / fail``. ``detail`` (the instrument IDN on
+        success or the error on failure) goes to the tooltip only — never
+        inline — so a long string can't widen the sidebar; the panel just
+        shows a coloured dot and a short fixed label."""
+        color, label = CONN_STATES.get(state, CONN_STATES["idle"])
+        self._conn_state = state if state in CONN_STATES else "idle"
+        self.conn_status.setText(
+            f'<span style="color:{color}; font-size:15px;">●</span> {label}'
+        )
+        self.conn_status.setToolTip(detail)
+
     def mark_acquired(self, acquired: bool) -> None:
         self._has_acquired = acquired
         self.save_acquired_btn.setEnabled(acquired)
 
     def _update_mode(self) -> None:
+        self._update_mode_widgets()
+        self.fileChanged.emit()
+
+    def _update_mode_widgets(self) -> None:
         mode = self.mode
         if mode == MODE_ACQUIRE:
             self.mode_stack.setCurrentIndex(1)
@@ -296,21 +373,51 @@ class DataSection(QFrame):
             if not two_file:
                 self._file2 = None
                 self.file2_edit.clear()
-        self.fileChanged.emit()
 
     def _pick(self, idx: int) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, "Select CSV", "", "CSV files (*.csv);;All files (*)",
+            self, "Select data file", "",
+            "Data files (*.csv *.npy *.npz);;CSV (*.csv);;"
+            "NumPy (*.npy *.npz);;All files (*)",
         )
         if not path:
             return
-        if idx == 1:
-            self._file1 = Path(path)
-            self.file1_edit.setText(path)
-        else:
-            self._file2 = Path(path)
-            self.file2_edit.setText(path)
+        self._set_file(idx, Path(path))
         self.fileChanged.emit()
+
+    def _set_file(self, idx: int, path: Path) -> None:
+        if idx == 1:
+            self._file1 = path
+            self.file1_edit.setText(str(path))
+        else:
+            self._file2 = path
+            self.file2_edit.setText(str(path))
+
+    def accept_dropped(self, paths: list[Path]) -> bool:
+        """Load file(s) dropped onto the window. One file → single-file mode;
+        two → two-file mode. Returns True if anything was accepted."""
+        paths = [p for p in paths if is_data_path(p)]
+        if not paths:
+            return False
+        if len(paths) >= 2:
+            self._set_mode(MODE_TWO_CSV)
+            self._set_file(1, paths[0])
+            self._set_file(2, paths[1])
+        else:
+            self._set_mode(MODE_SINGLE_CSV)
+            self._set_file(1, paths[0])
+        self.fileChanged.emit()
+        return True
+
+    def _set_mode(self, key: str) -> None:
+        """Select a data-source mode by key without re-emitting fileChanged
+        (the caller emits once after the file paths are set)."""
+        index = self.mode_combo.findData(key)
+        if index >= 0 and index != self.mode_combo.currentIndex():
+            blocked = self.mode_combo.blockSignals(True)
+            self.mode_combo.setCurrentIndex(index)
+            self.mode_combo.blockSignals(blocked)
+            self._update_mode_widgets()
 
 
 # ---------- Optical section ----------
@@ -349,7 +456,7 @@ class OpticalSection(QFrame):
         self._fsr_hz: float | None = None
         self._state: _FsrState = _FsrState.IDLE
 
-        self.n_core = QDoubleSpinBox()
+        self.n_core = NoWheelDoubleSpinBox()
         self.n_core.setRange(1.0, 2.0)
         self.n_core.setDecimals(4)
         self.n_core.setSingleStep(0.001)
@@ -357,12 +464,23 @@ class OpticalSection(QFrame):
         self.n_core.valueChanged.connect(self._refresh_display)
         _shrinkable(self.n_core)
 
-        self.aom_freq = QDoubleSpinBox()
+        self.aom_freq = NoWheelDoubleSpinBox()
         self.aom_freq.setRange(0.0, 5_000.0)
         self.aom_freq.setSuffix(" MHz")
         self.aom_freq.setDecimals(3)
         self.aom_freq.setValue(80.0)
         _shrinkable(self.aom_freq)
+
+        self.tau_fallback = NoWheelDoubleSpinBox()
+        self.tau_fallback.setRange(0.1, 100_000.0)
+        self.tau_fallback.setSuffix(" ns")
+        self.tau_fallback.setDecimals(1)
+        self.tau_fallback.setValue(100.0)
+        self.tau_fallback.setToolTip(
+            "Fallback delay used when FSR auto-calibration fails "
+            "(τ = 1/FSR)."
+        )
+        _shrinkable(self.tau_fallback)
 
         self.fsr_display = _metric(_FSR_STATE_TEXTS[_FsrState.IDLE][0])
         self.fsr_display.setWordWrap(True)
@@ -373,7 +491,7 @@ class OpticalSection(QFrame):
         self.calibrate_btn.setEnabled(False)
         self.calibrate_btn.clicked.connect(self.calibrateRequested.emit)
 
-        # n_core + AOM share one row to save vertical space
+        # n_core + AOM share one row; τ fallback gets its own row
         editable_row = QHBoxLayout()
         editable_row.setSpacing(6)
         nlbl = QLabel("n")
@@ -384,10 +502,16 @@ class OpticalSection(QFrame):
         editable_row.addWidget(QLabel("AOM"))
         editable_row.addWidget(self.aom_freq, 1)
 
+        tau_row = QHBoxLayout()
+        tau_row.setSpacing(6)
+        tau_row.addWidget(QLabel("τ fallback"))
+        tau_row.addWidget(self.tau_fallback, 1)
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 10, 12, 10)
         layout.setSpacing(6)
         layout.addLayout(editable_row)
+        layout.addLayout(tau_row)
         layout.addWidget(self.fsr_display)
         layout.addWidget(self.delay_len_display)
         layout.addWidget(self.calibrate_btn)
@@ -406,6 +530,11 @@ class OpticalSection(QFrame):
         if self._fsr_hz is None:
             return None
         return C_LIGHT / (self.n_core.value() * self._fsr_hz)
+
+    @property
+    def tau_fallback_hz(self) -> float:
+        """FSR derived from the manually-configured fallback τ."""
+        return 1.0 / (self.tau_fallback.value() * 1e-9)
 
     # ---- transitions driven by MainWindow ----
     def set_calibrating(self) -> None:
@@ -470,7 +599,7 @@ class SegmentSection(QFrame):
         self.bw_edit.setPlaceholderText("comma-separated, in kHz")
         _shrinkable(self.bw_edit)
 
-        self.ratio = QSpinBox()
+        self.ratio = NoWheelSpinBox()
         self.ratio.setRange(2, 200)
         self.ratio.setValue(10)
 
@@ -676,6 +805,7 @@ class SettingsPanel(QWidget):
     calibrateRequested = Signal()
     acquireRequested = Signal()
     saveAcquiredRequested = Signal()
+    testConnectionRequested = Signal()
     monitorStartRequested = Signal()
     monitorStopRequested = Signal()
 
@@ -728,6 +858,7 @@ class SettingsPanel(QWidget):
         self.data.fileChanged.connect(self.fileChanged.emit)
         self.data.acquireRequested.connect(self.acquireRequested.emit)
         self.data.saveAcquiredRequested.connect(self.saveAcquiredRequested.emit)
+        self.data.testConnectionRequested.connect(self.testConnectionRequested.emit)
         self.display.optionsChanged.connect(self.optionsChanged.emit)
         self.analysis.optionsChanged.connect(self.optionsChanged.emit)
         self.optical.calibrateRequested.connect(self.calibrateRequested.emit)

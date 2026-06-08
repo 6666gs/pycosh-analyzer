@@ -20,9 +20,9 @@ from .data_io import (
     DualBpdData,
     export_spectrum,
     from_arrays,
-    load_csv,
-    load_two_csv,
-    save_dual_bpd_csv,
+    load_record,
+    load_two_records,
+    save_record,
 )
 from .mzi_calibrate import MziResult
 from .plot_widget import DisplayOptions, SpectrumPlot, TrendPlot, _format_hz
@@ -33,13 +33,24 @@ from .processor import (
     ProcessWorker,
 )
 from .monitor import MonitorRequest, MonitorWorker
-from .scope import AcquireWorker, frame_to_arrays
+from .scope import AcquireWorker, TestConnectionWorker, frame_to_arrays
 from .settings_panel import (
     MODE_ACQUIRE,
     MODE_SINGLE_CSV,
     MODE_TWO_CSV,
     SettingsPanel,
 )
+
+
+def _resolve_save_path(path: str, selected_filter: str) -> Path:
+    """Pick the final save path. Honour an explicit .csv/.npy suffix the user
+    typed; otherwise append the extension implied by the chosen dialog filter
+    (defaults to .csv)."""
+    p = Path(path)
+    if p.suffix.lower() in (".csv", ".npy"):
+        return p
+    ext = ".npy" if "npy" in selected_filter.lower() else ".csv"
+    return p.with_suffix(ext)
 
 
 class MainWindow(QMainWindow):
@@ -57,6 +68,7 @@ class MainWindow(QMainWindow):
         self._proc_worker: ProcessWorker | None = None
         self._cal_worker: CalibrateWorker | None = None
         self._acq_worker: AcquireWorker | None = None
+        self._conn_worker: TestConnectionWorker | None = None
         self._monitor_worker: MonitorWorker | None = None
         self._trend_t: deque[float] = deque(maxlen=1000)
         self._trend_fwhm: deque[float] = deque(maxlen=1000)
@@ -98,9 +110,32 @@ class MainWindow(QMainWindow):
             lambda: self._start_calibrate(user_initiated=True)
         )
         self.settings.acquireRequested.connect(self._start_acquire)
+        self.settings.testConnectionRequested.connect(self._test_connection)
         self.settings.saveAcquiredRequested.connect(self._save_acquired)
         self.settings.monitorStartRequested.connect(self._start_monitor)
         self.settings.monitorStopRequested.connect(self._stop_monitor)
+
+        # Drag a .csv/.npy/.npz file (or two) onto the window to load it.
+        self.setAcceptDrops(True)
+
+    # ---------- drag & drop ----------
+
+    def dragEnterEvent(self, event) -> None:  # noqa: N802 (Qt override)
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+
+    def dropEvent(self, event) -> None:  # noqa: N802 (Qt override)
+        paths = [
+            Path(url.toLocalFile())
+            for url in event.mimeData().urls()
+            if url.isLocalFile()
+        ]
+        if self.settings.data.accept_dropped(paths):
+            event.acceptProposedAction()
+        else:
+            self.statusBar().showMessage(
+                "Dropped file ignored (need a .csv, .npy or .npz)."
+            )
 
     # ---------- data loading ----------
 
@@ -118,14 +153,14 @@ class MainWindow(QMainWindow):
             return
         try:
             if mode == MODE_SINGLE_CSV:
-                self._data = load_csv(f1)
+                self._data = load_record(f1)
             else:  # MODE_TWO_CSV
                 if not f2:
                     self.settings.data.set_info(
                         f"Loaded BPD1 ({f1.name}). Select BPD2 to enable processing."
                     )
                     return
-                self._data = load_two_csv(f1, f2)
+                self._data = load_two_records(f1, f2)
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, "Load error", str(exc))
             return
@@ -179,6 +214,32 @@ class MainWindow(QMainWindow):
 
     # ---------- scope acquisition ----------
 
+    # ---------- scope connection test ----------
+
+    def _test_connection(self) -> None:
+        host = self.settings.data.scope_host
+        if not host:
+            self.settings.data.set_connection_status("fail", "no IP entered")
+            return
+        if self._conn_worker is not None and self._conn_worker.isRunning():
+            return  # a test is already in flight
+        self.settings.data.set_connection_status("testing")
+        self.settings.data.test_conn_btn.setEnabled(False)
+        self.statusBar().showMessage(f"Testing connection to {host} …")
+        self._conn_worker = TestConnectionWorker(host)
+        self._launch_worker(
+            self._conn_worker, self._on_conn_ok, self._on_conn_err,
+            done_slot=lambda: self.settings.data.test_conn_btn.setEnabled(True),
+        )
+
+    def _on_conn_ok(self, idn: str) -> None:
+        self.settings.data.set_connection_status("ok", idn)
+        self.statusBar().showMessage(f"Scope connected: {idn}")
+
+    def _on_conn_err(self, message: str) -> None:
+        self.settings.data.set_connection_status("fail", message)
+        self.statusBar().showMessage("Scope connection failed.")
+
     def _start_acquire(self) -> None:
         host = self.settings.data.scope_host
         ch1 = self.settings.data.scope_ch1_name
@@ -219,18 +280,20 @@ class MainWindow(QMainWindow):
     def _save_acquired(self) -> None:
         if self._data is None:
             return
-        default = (f"acquired_{dt.datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Save acquired data", default, "CSV (*.csv)",
+        stem = f"acquired_{dt.datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        path, selected = QFileDialog.getSaveFileName(
+            self, "Save acquired data", stem,
+            "CSV (*.csv);;NumPy array (*.npy)",
         )
         if not path:
             return
+        out = _resolve_save_path(path, selected)
         try:
-            save_dual_bpd_csv(Path(path), self._data)
+            save_record(out, self._data)
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, "Save failed", str(exc))
             return
-        self.statusBar().showMessage(f"Saved acquired data → {path}")
+        self.statusBar().showMessage(f"Saved acquired data → {out}")
 
     # ---------- processing ----------
 
@@ -457,19 +520,15 @@ class MainWindow(QMainWindow):
 
     def _on_calibrate_ok(self, res: MziResult) -> None:
         if res.fsr_hz is None:
-            self.settings.optical.calibration_failed()
-            self.settings.set_calibrated(False)
+            fsr_fb = self.settings.optical.tau_fallback_hz
+            tau_ns = 1e9 / fsr_fb
+            self.settings.optical.apply_calibrated_fsr(fsr_fb)
+            self.settings.set_calibrated(True)
             self.statusBar().showMessage(
-                "Calibration: no clean FSR zero detected."
+                f"FSR auto-calibration failed — using configured τ = {tau_ns:.1f} ns "
+                f"(FSR = {fsr_fb/1e6:.4f} MHz)."
             )
-            if self._cal_user_initiated:
-                QMessageBox.information(
-                    self, "Calibration",
-                    "FSR auto-calibration could not find a clean MZI fringe "
-                    f"zero (carrier ≈ {res.carrier_hz/1e6:.3f} MHz). "
-                    "Process is locked until calibration succeeds — try a "
-                    "longer record or check that the beat signal is clean."
-                )
+            self._start_process()
             return
         self.settings.optical.apply_calibrated_fsr(res.fsr_hz)
         self.settings.set_calibrated(True)

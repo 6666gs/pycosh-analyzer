@@ -10,6 +10,14 @@ pyvisa-py>=0.7
 psutil>=5.9
 zeroconf>=0.131
 
+# GPU acceleration (optional). Processing auto-uses a CUDA (NVIDIA) or ROCm
+# (AMD-on-Linux) GPU when torch is installed, else runs the parallel CPU path.
+# Apple Silicon / iGPU / AMD-on-Windows have no usable torch.fft GPU backend,
+# so they stay on the (fast, multi-threaded) CPU path — no need to install torch.
+#   NVIDIA:  pip install torch --index-url https://download.pytorch.org/whl/cu121
+#   AMD/ROCm: pip install torch --index-url https://download.pytorch.org/whl/rocm6.1
+# torch>=2.1
+
 # Development / testing (optional — only needed to run the test suite)
 pytest>=8.0
 pytest-qt>=4.4

@@ -94,6 +94,44 @@ class AcquireWorker(QThread):
             self.finished_err.emit(f"{type(exc).__name__}: {exc}")
 
 
+class TestConnectionWorker(QThread):
+    """Lightweight reachability check: connect, query ``*IDN?``, disconnect.
+
+    Unlike AcquireWorker it triggers no acquisition and changes no scope state,
+    so it is safe to run any time. `scope_factory` lets tests inject a fake
+    scope; production uses the vendored SDS7404 driver.
+    """
+    finished_ok = Signal(str)        # idn string
+    finished_err = Signal(str)
+
+    def __init__(
+        self,
+        host: str,
+        timeout_ms: int = 5_000,
+        scope_factory=None,
+        parent: QObject | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.host = host
+        self.timeout_ms = timeout_ms
+        self._scope_factory = scope_factory
+
+    def _open_scope(self):
+        if self._scope_factory is not None:
+            return self._scope_factory(self.host, timeout_ms=self.timeout_ms)
+        ensure_sds7404_importable()
+        from sds7404 import SDS7404  # type: ignore
+        return SDS7404(self.host, timeout_ms=self.timeout_ms)
+
+    def run(self) -> None:
+        try:
+            with self._open_scope() as scope:
+                idn = scope.idn()
+            self.finished_ok.emit(idn)
+        except Exception as exc:  # noqa: BLE001
+            self.finished_err.emit(f"{type(exc).__name__}: {exc}")
+
+
 def frame_to_arrays(
     frame, ch1: str, ch2: str | None
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, float]:

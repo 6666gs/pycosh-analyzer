@@ -104,11 +104,22 @@ class ProcessResult:
         return self.s_nu_12_err / self.freq**2
 
 
-def run_cosh(request: ProcessRequest, progress=None) -> ProcessResult:
+def run_cosh(
+    request: ProcessRequest,
+    progress=None,
+    use_gpu: bool = True,
+) -> ProcessResult:
     """Run pycosh's CoshXcorr for one request and build a ProcessResult.
 
     Pure (no Qt). Shared by ProcessWorker and MonitorWorker. `progress` is an
     optional callable(str) for status messages.
+
+    When ``use_gpu`` is True (default) the call dispatches through
+    ``CoshXcorr.process_gpu()``, which auto-selects a CUDA/ROCm GPU if one is
+    present and otherwise runs the parallel CPU path. On Apple Silicon / iGPU /
+    AMD-on-Windows machines this transparently uses the CPU (see
+    CoshXcorr.process_gpu for why Metal/MPS is skipped). Pass ``use_gpu=False``
+    to force the CPU path.
     """
     def _say(msg: str) -> None:
         if progress is not None:
@@ -128,8 +139,12 @@ def run_cosh(request: ProcessRequest, progress=None) -> ProcessResult:
     )
     trace2 = request.v2 if request.v2 is not None else request.v1
     cosh = CoshXcorr(trace1=request.v1, trace2=trace2, config=cfg)
-    _say("Running Hilbert + multi-band FFT …")
-    cosh.process(print_progress=False)
+    if use_gpu:
+        _say("Running Hilbert + multi-band FFT (GPU if available, else CPU) …")
+        cosh.process_gpu(print_progress=False)
+    else:
+        _say("Running Hilbert + multi-band FFT (CPU) …")
+        cosh.process(print_progress=False)
     return ProcessResult(
         freq=np.asarray(cosh.freq_list),
         gfilter=np.asarray(cosh.freq_filter),

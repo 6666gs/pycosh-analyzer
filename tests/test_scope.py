@@ -76,3 +76,33 @@ def test_acquire_worker_resume_false_skips_run(qtbot):
     worker.run()
 
     assert not any(isinstance(c, str) and c.startswith("run(") for c in factory.last.calls)
+
+
+def test_connection_worker_emits_idn_on_success(qtbot):
+    from app.scope import TestConnectionWorker
+
+    factory = FakeScopeFactory()
+    worker = TestConnectionWorker("1.2.3.4", scope_factory=factory)
+    idns = []
+    worker.finished_ok.connect(lambda s: idns.append(s))
+
+    worker.run()
+
+    assert idns == ["FAKE,SDS7404,0,0"]
+    # Connection opened and closed with no acquisition side effects.
+    assert factory.last.calls == ["enter", "close"]
+
+
+def test_connection_worker_emits_error_on_failure(qtbot):
+    from app.scope import TestConnectionWorker
+
+    def boom(host, **kwargs):
+        raise OSError("host unreachable")
+
+    worker = TestConnectionWorker("1.2.3.4", scope_factory=boom)
+    errs = []
+    worker.finished_err.connect(lambda m: errs.append(m))
+
+    worker.run()
+
+    assert errs and "host unreachable" in errs[0]

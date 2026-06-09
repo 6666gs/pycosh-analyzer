@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import numpy as np
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
+from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QVBoxLayout, QWidget
 
 from .analysis import BETA_SLOPE, BetaIntegration, LorentzFit, beta_line
@@ -162,7 +163,14 @@ def _format_hz(value: float) -> str:
 
 
 class TrendPlot(QWidget):
-    """Compact strip charting a scalar lock metric (Lorentz FWHM) vs time."""
+    """Compact strip charting a scalar lock metric (Lorentz FWHM) vs time.
+
+    Clicking a point emits ``pointSelected`` with that point's index (nearest
+    by elapsed time on the x-axis), so the spectrum view can be restored to
+    that cycle.
+    """
+
+    pointSelected = Signal(int)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -176,7 +184,16 @@ class TrendPlot(QWidget):
         layout.addWidget(self.canvas)
 
         self._ax = self.figure.add_subplot(111)
+        self._times: list[float] = []
+        self.canvas.mpl_connect("button_press_event", self._on_click)
         self.clear()
+
+    def _on_click(self, event) -> None:
+        """Map a click to the nearest point by elapsed time (x only)."""
+        if event.inaxes is not self._ax or event.xdata is None or not self._times:
+            return
+        idx = int(np.argmin(np.abs(np.asarray(self._times) - event.xdata)))
+        self.pointSelected.emit(idx)
 
     def clear(self) -> None:
         self._ax.clear()
@@ -194,6 +211,7 @@ class TrendPlot(QWidget):
 
     def update_trend(self, times: list[float], fwhms: list[float]) -> None:
         self.clear()
+        self._times = list(times)
         if times and fwhms:
             self._ax.semilogy(times, fwhms, color="#007AFF", linewidth=1.4,
                               marker="o", markersize=3)

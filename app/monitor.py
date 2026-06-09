@@ -12,6 +12,7 @@ from dataclasses import dataclass
 
 from PySide6.QtCore import QObject, QThread, Signal
 
+from .data_io import from_arrays
 from .processor import ProcessRequest, ProcessResult, run_cosh
 from .scope import ensure_sds7404_importable, frame_to_arrays
 
@@ -32,7 +33,8 @@ class MonitorRequest:
 
 class MonitorWorker(QThread):
     """Loops single→read→run_cosh→emit until request_stop()."""
-    cycle_done = Signal(object, float)   # (ProcessResult, elapsed_seconds)
+    # (ProcessResult, elapsed_seconds, raw DualBpdData for this cycle)
+    cycle_done = Signal(object, float, object)
     progress = Signal(str)
     finished_err = Signal(str)
 
@@ -59,12 +61,19 @@ class MonitorWorker(QThread):
         channels = [req.ch1] + ([req.ch2] if req.ch2 else [])
         try:
             with self._open_scope() as scope:
+                # Free-run in AUTO mode: the scope keeps acquiring and
+                # auto-triggers, so each cycle reads a real beat without ever
+                # blocking on an external trigger (a SINGle-shot wait would
+                # hang forever when no trigger event occurs).
+                scope.run()
                 start = time.monotonic()
                 while not self._stop:
-                    if req.send_single:
-                        scope.single()
+                    # Freeze a coherent frame (stop → read → resume); stop()
+                    # returns immediately, it does NOT wait for a trigger.
+                    scope.stop()
                     frame = scope.read_channels(channels)
-                    _t, v1, v2, sr = frame_to_arrays(frame, req.ch1, req.ch2)
+                    scope.run()
+                    t, v1, v2, sr = frame_to_arrays(frame, req.ch1, req.ch2)
                     proc_req = ProcessRequest(
                         v1=v1, v2=v2, sample_rate=sr,
                         delay_freq=req.delay_freq,
@@ -74,8 +83,8 @@ class MonitorWorker(QThread):
                         range_stop=req.range_stop,
                     )
                     result = run_cosh(proc_req)
-                    self.cycle_done.emit(result, time.monotonic() - start)
-                # Leave the scope live for the operator.
-                scope.run()
+                    raw = from_arrays(t, v1, v2, sr, label="monitor")
+                    self.cycle_done.emit(result, time.monotonic() - start, raw)
+                # Loop left the scope running (AUTO) — live for the operator.
         except Exception as exc:  # noqa: BLE001
             self.finished_err.emit(f"{type(exc).__name__}: {exc}")

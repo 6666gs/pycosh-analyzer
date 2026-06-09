@@ -82,6 +82,11 @@ class AcquireWorker(QThread):
                 if self.send_single:
                     self.progress.emit("Sending SINGle trigger, waiting Stop …")
                     scope.single()
+                else:
+                    # Freeze a coherent frame from the live acquisition. Reading
+                    # an un-stopped scope yields a torn frame whose carrier is
+                    # wrong, which makes FSR auto-calibration miss its dip.
+                    scope.stop()
                 channels = [self.ch1] + ([self.ch2] if self.ch2 else [])
                 self.progress.emit(f"Reading channels {channels} …")
                 frame = scope.read_channels(channels)

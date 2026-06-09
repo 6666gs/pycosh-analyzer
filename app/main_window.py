@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QMainWindow,
     QMessageBox,
+    QPushButton,
     QStatusBar,
     QVBoxLayout,
     QWidget,
@@ -33,7 +34,12 @@ from .processor import (
     ProcessWorker,
 )
 from .monitor import MonitorRequest, MonitorWorker
-from .monitor_io import MonitorRecorder
+from .monitor_io import (
+    MonitorFrame,
+    MonitorRecorder,
+    load_spectrum_result,
+    save_cycle_spectrum,
+)
 from .scope import AcquireWorker, TestConnectionWorker, frame_to_arrays
 from .settings_panel import (
     MODE_ACQUIRE,
@@ -72,6 +78,13 @@ class MainWindow(QMainWindow):
         self._conn_worker: TestConnectionWorker | None = None
         self._monitor_worker: MonitorWorker | None = None
         self._monitor_recorder: MonitorRecorder | None = None
+        # Last up-to-3 cycles (raw trace + result) kept for rollback save.
+        self._monitor_buffer: deque[MonitorFrame] = deque(maxlen=3)
+        # Most recent live result, so we can return after browsing history.
+        self._latest_result: ProcessResult | None = None
+        # Monitoring can be paused (Stop) and resumed unless cleared.
+        self._can_resume_monitor: bool = False
+        self._monitor_time_offset: float = 0.0
         self._trend_t: deque[float] = deque(maxlen=1000)
         self._trend_fwhm: deque[float] = deque(maxlen=1000)
         # Whether the calibration currently running was launched by an
@@ -84,11 +97,23 @@ class MainWindow(QMainWindow):
         self.trend = TrendPlot()
         self.trend.setVisible(False)
 
+        # "Return to latest" sits in the top-right corner above the trend; it
+        # only shows while viewing a restored historical spectrum.
+        self.return_latest_btn = QPushButton("↩ Latest")
+        self.return_latest_btn.setProperty("variant", "secondary")
+        self.return_latest_btn.clicked.connect(self._return_to_latest)
+        self.return_latest_btn.setVisible(False)
+        history_bar = QHBoxLayout()
+        history_bar.setContentsMargins(8, 2, 8, 2)
+        history_bar.addStretch(1)
+        history_bar.addWidget(self.return_latest_btn)
+
         plot_container = QWidget()
         plot_col = QVBoxLayout(plot_container)
         plot_col.setContentsMargins(0, 0, 0, 0)
         plot_col.setSpacing(0)
         plot_col.addWidget(self.plot, 1)
+        plot_col.addLayout(history_bar)
         plot_col.addWidget(self.trend)
 
         central = QWidget()
@@ -116,6 +141,11 @@ class MainWindow(QMainWindow):
         self.settings.saveAcquiredRequested.connect(self._save_acquired)
         self.settings.monitorStartRequested.connect(self._start_monitor)
         self.settings.monitorStopRequested.connect(self._stop_monitor)
+        self.settings.monitorClearRequested.connect(self._clear_monitor)
+        self.settings.saveFrameRawRequested.connect(self._save_frame_raw)
+        self.settings.saveFrameSpectrumRequested.connect(self._save_frame_spectrum)
+        self.trend.pointSelected.connect(self._restore_spectrum_from_trend)
+        self.settings.set_monitor_resumable(False)
 
         # Drag a .csv/.npy/.npz file (or two) onto the window to load it.
         self.setAcceptDrops(True)
@@ -373,40 +403,55 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Invalid settings", str(exc))
             return
 
-        # If "Save" is ticked, choose the output folder up front. Cancelling
-        # the dialog aborts the start (the user asked to save).
-        recorder = None
-        if self.settings.save_monitor_enabled:
-            directory = QFileDialog.getExistingDirectory(
-                self, "Choose a folder to save monitoring data")
-            if not directory:
-                self.statusBar().showMessage("Monitoring cancelled (no folder chosen).")
-                return
-            try:
-                recorder = MonitorRecorder(directory)
-            except OSError as exc:
-                QMessageBox.critical(self, "Cannot save here", str(exc))
-                return
-        self._monitor_recorder = recorder
+        # A monitoring session can be paused (Stop) and resumed: clicking
+        # Monitor again CONTINUES the same run (same folder, same trend,
+        # continued cycle numbering) unless the user pressed Clear, which forces
+        # a fresh start (new folder prompt + everything reset to zero).
+        fresh = not self._can_resume_monitor
+        if fresh:
+            recorder = None
+            if self.settings.save_monitor_enabled:
+                directory = QFileDialog.getExistingDirectory(
+                    self, "Choose a folder to save monitoring data")
+                if not directory:
+                    self.statusBar().showMessage("Monitoring cancelled (no folder chosen).")
+                    return
+                try:
+                    recorder = MonitorRecorder(directory)
+                except OSError as exc:
+                    QMessageBox.critical(self, "Cannot save here", str(exc))
+                    return
+            self._monitor_recorder = recorder
+            self._monitor_buffer.clear()
+            self._latest_result = None
+            self._trend_t.clear()
+            self._trend_fwhm.clear()
+            self.trend.clear()
+            self._monitor_time_offset = 0.0
+            self.settings.set_rollback_available(0)
+        else:
+            # Resume: keep recorder/trend/buffer; continue the elapsed-time axis
+            # from where it left off so the trend stays monotonic.
+            self._monitor_time_offset = self._trend_t[-1] if self._trend_t else 0.0
+
+        self.return_latest_btn.setVisible(False)
+        self.trend.setVisible(True)
+        self.settings.set_monitoring(True)
+        self._can_resume_monitor = True
+        self.statusBar().showMessage(
+            "Live monitoring started…" if fresh else "Live monitoring resumed…")
 
         req = MonitorRequest(
             host=self.settings.data.scope_host,
             ch1=self.settings.data.scope_ch1_name,
             ch2=self.settings.data.scope_ch2_name,
-            send_single=True,
+            send_single=False,  # monitoring free-runs (AUTO); never waits a trigger
             delay_freq=snap.delay_freq_hz,
             bw_segment=snap.bw_segment_hz,
             offset_start_ratio=snap.offset_start_ratio,
             range_start=snap.range_start,
             range_stop=snap.range_stop,
         )
-
-        self._trend_t.clear()
-        self._trend_fwhm.clear()
-        self.trend.clear()
-        self.trend.setVisible(True)
-        self.settings.set_monitoring(True)
-        self.statusBar().showMessage("Live monitoring started…")
 
         self._monitor_worker = MonitorWorker(req)
         self._monitor_worker.progress.connect(self.statusBar().showMessage)
@@ -416,9 +461,20 @@ class MainWindow(QMainWindow):
         self._monitor_worker.finished.connect(self._monitor_worker.deleteLater)
         self._monitor_worker.start()
 
-    def _on_monitor_cycle(self, result: ProcessResult, elapsed: float) -> None:
+    def _on_monitor_cycle(self, result: ProcessResult, elapsed: float,
+                          raw: DualBpdData) -> None:
+        # Continue the elapsed-time axis across pause/resume (0 on a fresh run).
+        elapsed = self._monitor_time_offset + elapsed
         self._result = result
+        self._latest_result = result
         self.settings.set_export_enabled(True)  # latest frame is exportable once stopped
+        # A new live frame leaves any historical view.
+        self.return_latest_btn.setVisible(False)
+
+        stamp = dt.datetime.now().strftime("%H%M%S")
+        self._monitor_buffer.append(
+            MonitorFrame(raw=raw, result=result, elapsed=elapsed, stamp=stamp))
+        self.settings.set_rollback_available(len(self._monitor_buffer))
 
         lorentz_fwhm = None
         beta_fwhm = None
@@ -448,8 +504,7 @@ class MainWindow(QMainWindow):
         if self._monitor_recorder is not None:
             try:
                 self._monitor_recorder.record(
-                    result, elapsed, lorentz_fwhm, beta_fwhm,
-                    stamp=dt.datetime.now().strftime("%H%M%S"),
+                    result, elapsed, lorentz_fwhm, beta_fwhm, stamp=stamp,
                 )
                 saved_note = f" · saved {self._monitor_recorder.count}"
             except Exception as exc:  # noqa: BLE001
@@ -470,13 +525,115 @@ class MainWindow(QMainWindow):
     def _on_monitor_finished(self) -> None:
         self._monitor_worker = None
         self.settings.set_monitoring(False)
+        # Paused, not finished: the next Monitor click resumes this session
+        # (unless Clear is pressed first).
+        self.settings.set_monitor_resumable(True)
         self.statusBar().showMessage(
-            f"Monitoring stopped. {len(self._trend_t)} frames captured."
+            f"Monitoring paused. {len(self._trend_t)} frames captured — "
+            f"click Monitor to resume, or Clear to start fresh."
         )
+
+    def _clear_monitor(self) -> None:
+        """Discard the current monitoring session so the next start is fresh
+        (new folder prompt, trend/buffer/cycle count reset to zero)."""
+        self._monitor_recorder = None
+        self._monitor_buffer.clear()
+        self._latest_result = None
+        self._trend_t.clear()
+        self._trend_fwhm.clear()
+        self.trend.clear()
+        self.trend.setVisible(False)
+        self._monitor_time_offset = 0.0
+        self._can_resume_monitor = False
+        self.return_latest_btn.setVisible(False)
+        self.settings.set_rollback_available(0)
+        self.settings.set_monitor_resumable(False)
+        self.statusBar().showMessage("Monitoring session cleared — next start is fresh.")
 
     def _on_monitor_err(self, message: str) -> None:
         self.statusBar().showMessage("Monitoring failed.")
         QMessageBox.critical(self, "Monitoring failed", message)
+
+    # ---------- history review + rollback save ----------
+
+    def _restore_spectrum_from_trend(self, index: int) -> None:
+        """Clicking a trend point restores the upper spectrum to that cycle,
+        loaded from its saved .npz (requires monitoring with 'Save' enabled)."""
+        rec = self._monitor_recorder
+        if rec is None or not rec.spectrum_paths:
+            self.statusBar().showMessage(
+                "Enable 'Save' before monitoring to revisit a cycle's spectrum.")
+            return
+        # The trend strip shows only the last len(_trend_t) cycles, while
+        # spectrum_paths holds every cycle — offset the clicked display index
+        # into the full list so the mapping stays correct past 1000 cycles.
+        file_index = len(rec.spectrum_paths) - len(self._trend_t) + index
+        if not 0 <= file_index < len(rec.spectrum_paths):
+            self.statusBar().showMessage("No saved spectrum for that point.")
+            return
+        try:
+            self._result = load_spectrum_result(rec.spectrum_paths[file_index])
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "Cannot load spectrum", str(exc))
+            return
+        self.return_latest_btn.setVisible(self._latest_result is not None)
+        self._redraw()
+        self.statusBar().showMessage(
+            f"Showing saved cycle {file_index + 1} — click ↩ Latest to return.")
+
+    def _return_to_latest(self) -> None:
+        if self._latest_result is None:
+            return
+        self._result = self._latest_result
+        self.return_latest_btn.setVisible(False)
+        self._redraw()
+        self.statusBar().showMessage("Back to the latest spectrum.")
+
+    def _selected_frame(self) -> MonitorFrame | None:
+        """The rollback-buffer frame the user picked (current / −1 / −2)."""
+        offset = self.settings.rollback_offset
+        if offset + 1 > len(self._monitor_buffer):
+            return None
+        return self._monitor_buffer[-(offset + 1)]
+
+    def _save_frame_raw(self) -> None:
+        frame = self._selected_frame()
+        if frame is None:
+            return
+        stem = f"frame_{frame.stamp}"
+        path, selected = QFileDialog.getSaveFileName(
+            self, "Save frame raw data", stem,
+            "CSV (*.csv);;NumPy array (*.npy)",
+        )
+        if not path:
+            return
+        out = _resolve_save_path(path, selected)
+        try:
+            save_record(out, frame.raw)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "Save failed", str(exc))
+            return
+        self.statusBar().showMessage(f"Saved frame raw data → {out}")
+
+    def _save_frame_spectrum(self) -> None:
+        frame = self._selected_frame()
+        if frame is None:
+            return
+        stem = f"spectrum_{frame.stamp}.npz"
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save frame spectrum", stem, "NumPy archive (*.npz)",
+        )
+        if not path:
+            return
+        out = Path(path)
+        if out.suffix.lower() != ".npz":
+            out = out.with_suffix(".npz")
+        try:
+            save_cycle_spectrum(out, frame.result)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "Save failed", str(exc))
+            return
+        self.statusBar().showMessage(f"Saved frame spectrum → {out}")
 
     # ---------- display + analysis ----------
 
@@ -562,9 +719,12 @@ class MainWindow(QMainWindow):
             tau_ns = 1e9 / fsr_fb
             self.settings.optical.apply_calibrated_fsr(fsr_fb)
             self.settings.set_calibrated(True)
+            # Surface why detection failed — a bogus carrier (e.g. from a torn
+            # or triggerless frame) collapses the search band and hides the dip.
             self.statusBar().showMessage(
-                f"FSR auto-calibration failed — using configured τ = {tau_ns:.1f} ns "
-                f"(FSR = {fsr_fb/1e6:.4f} MHz)."
+                f"No FSR dip found (carrier {res.carrier_hz / 1e6:.2f} MHz, "
+                f"searched {res.search_lo / 1e6:.2f}–{res.search_hi / 1e6:.2f} MHz)"
+                f" — using configured τ = {tau_ns:.1f} ns (FSR {fsr_fb / 1e6:.4f} MHz)."
             )
             self._start_process()
             return

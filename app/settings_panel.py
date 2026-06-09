@@ -808,6 +808,9 @@ class SettingsPanel(QWidget):
     testConnectionRequested = Signal()
     monitorStartRequested = Signal()
     monitorStopRequested = Signal()
+    monitorClearRequested = Signal()
+    saveFrameRawRequested = Signal()
+    saveFrameSpectrumRequested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -854,6 +857,16 @@ class SettingsPanel(QWidget):
         self.monitor_btn.setEnabled(False)
         self._monitoring: bool = False
 
+        # Clear ends the current (paused) monitoring session so the next start
+        # is fresh. Enabled only when stopped with a resumable session.
+        self.monitor_clear_btn = _secondary_btn("Clear")
+        self.monitor_clear_btn.setEnabled(False)
+        self.monitor_clear_btn.setToolTip(
+            "Clear the paused monitoring session. The next Monitor start picks a "
+            "new folder and restarts from zero; without Clear, Monitor resumes."
+        )
+        self.monitor_clear_btn.clicked.connect(self.monitorClearRequested.emit)
+
         # When checked, starting Monitor first asks for a folder and then
         # auto-saves every cycle's spectrum (.npz) plus the Lorentz/β trend.
         self.save_monitor_check = QCheckBox("Save")
@@ -861,6 +874,16 @@ class SettingsPanel(QWidget):
             "Save each monitoring cycle's noise spectrum (.npz) and the "
             "Lorentz/β trend to a chosen folder."
         )
+
+        # Rollback save: the last up-to-3 monitoring cycles are kept in memory
+        # so the user can grab a good frame's raw trace and/or spectrum.
+        self.rollback_combo = NoWheelComboBox()
+        self.save_frame_raw_btn = _secondary_btn("Save raw…")
+        self.save_frame_raw_btn.clicked.connect(self.saveFrameRawRequested.emit)
+        self.save_frame_spec_btn = _secondary_btn("Save spectrum…")
+        self.save_frame_spec_btn.clicked.connect(self.saveFrameSpectrumRequested.emit)
+        self.rollback_group = self._build_rollback_group()
+        self.set_rollback_available(0)
 
         # forward signals
         self.data.fileChanged.connect(self.fileChanged.emit)
@@ -921,8 +944,10 @@ class SettingsPanel(QWidget):
         monitor_row.setContentsMargins(0, 0, 0, 0)
         monitor_row.addWidget(self.monitor_btn, 1)
         monitor_row.addWidget(self.save_monitor_check)
+        monitor_row.addWidget(self.monitor_clear_btn)
         btn_layout.addLayout(monitor_row)
         btn_layout.addWidget(self.export_btn)
+        btn_layout.addWidget(self.rollback_group)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -933,6 +958,51 @@ class SettingsPanel(QWidget):
     @property
     def save_monitor_enabled(self) -> bool:
         return self.save_monitor_check.isChecked()
+
+    def _build_rollback_group(self) -> QWidget:
+        """A small 'save a recent frame' panel: pick current/−1/−2, then save
+        its raw trace and/or spectrum. Hidden until a cycle has been seen."""
+        group = QWidget()
+        col = QVBoxLayout(group)
+        col.setContentsMargins(0, 4, 0, 0)
+        col.setSpacing(6)
+        pick = QHBoxLayout()
+        pick.setSpacing(6)
+        pick.addWidget(QLabel("Recent frame"))
+        pick.addWidget(self.rollback_combo, 1)
+        save = QHBoxLayout()
+        save.setSpacing(6)
+        save.addWidget(self.save_frame_raw_btn, 1)
+        save.addWidget(self.save_frame_spec_btn, 1)
+        col.addLayout(pick)
+        col.addLayout(save)
+        return group
+
+    @property
+    def rollback_offset(self) -> int:
+        """How far back the selected frame is: 0 = current, 1 = −1, 2 = −2."""
+        data = self.rollback_combo.currentData()
+        return int(data) if data is not None else 0
+
+    def set_rollback_available(self, n_frames: int) -> None:
+        """Populate the frame picker with the ``n_frames`` (0–3) cycles kept in
+        memory and enable saving when at least one exists."""
+        self.rollback_group.setVisible(n_frames > 0)
+        prev = self.rollback_combo.currentData()
+        labels = ["current", "−1 (previous)", "−2 (two ago)"]
+        blocked = self.rollback_combo.blockSignals(True)
+        self.rollback_combo.clear()
+        for offset in range(min(n_frames, 3)):
+            self.rollback_combo.addItem(labels[offset], userData=offset)
+        # Keep the previous selection if still valid.
+        if prev is not None:
+            idx = self.rollback_combo.findData(prev)
+            if idx >= 0:
+                self.rollback_combo.setCurrentIndex(idx)
+        self.rollback_combo.blockSignals(blocked)
+        has = n_frames > 0
+        self.save_frame_raw_btn.setEnabled(has)
+        self.save_frame_spec_btn.setEnabled(has)
 
     def set_export_enabled(self, enabled: bool) -> None:
         self._can_export = enabled
@@ -976,8 +1046,18 @@ class SettingsPanel(QWidget):
         self.data.acquire_btn.setEnabled(not monitoring)
         self.save_monitor_check.setEnabled(not monitoring)
         self.export_btn.setEnabled(self._can_export and not monitoring)
+        if monitoring:
+            self.monitor_clear_btn.setEnabled(False)  # can't clear mid-run
         self._refresh_process_btn()
         self._refresh_monitor_btn()
+
+    def set_monitor_resumable(self, resumable: bool) -> None:
+        """Reflect whether a paused session can be resumed: enable Clear and
+        relabel Monitor as 'Resume' (only meaningful while stopped)."""
+        self.monitor_clear_btn.setEnabled(resumable and not self._monitoring)
+        if not self._monitoring:
+            self.monitor_btn.setText(
+                "▶  Resume monitoring" if resumable else "▶  Monitor (live)")
 
     def set_acquiring(self, busy: bool) -> None:
         self.data.acquire_btn.setEnabled(not busy)

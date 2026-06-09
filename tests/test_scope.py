@@ -78,6 +78,20 @@ def test_acquire_worker_resume_false_skips_run(qtbot):
     assert not any(isinstance(c, str) and c.startswith("run(") for c in factory.last.calls)
 
 
+def test_acquire_worker_stops_before_read_when_not_single(qtbot):
+    from app.scope import AcquireWorker
+
+    factory = FakeScopeFactory()
+    worker = AcquireWorker("1.2.3.4", "C1", "C2", send_single=False,
+                           scope_factory=factory)
+    worker.run()
+
+    calls = factory.last.calls
+    assert "single" not in calls                      # no blocking trigger wait
+    # frame is frozen (stop) before the multi-channel read for coherence
+    assert calls.index("stop") < calls.index(("read_channels", ("C1", "C2")))
+
+
 def test_connection_worker_emits_idn_on_success(qtbot):
     from app.scope import TestConnectionWorker
 

@@ -14,7 +14,8 @@ def test_monitor_worker_loops_and_resumes_on_stop(qtbot):
     worker = MonitorWorker(req, scope_factory=factory)
 
     results = []
-    worker.cycle_done.connect(lambda result, elapsed: results.append((result, elapsed)))
+    worker.cycle_done.connect(
+        lambda result, elapsed, raw: results.append((result, elapsed, raw)))
 
     worker.start()
     qtbot.waitUntil(lambda: len(results) >= 2, timeout=10_000)
@@ -23,12 +24,16 @@ def test_monitor_worker_loops_and_resumes_on_stop(qtbot):
     worker.wait()
 
     assert len(results) >= 2
-    first_result, first_elapsed = results[0]
+    first_result, first_elapsed, first_raw = results[0]
     assert first_result.freq.size > 0          # a real ProcessResult per cycle
     assert isinstance(first_elapsed, float)
+    assert first_raw.v1.size > 0               # raw trace carried for rollback save
     scope = factory.last
-    assert "single" in scope.calls              # fresh SINGle each cycle
-    assert any(isinstance(c, str) and c.startswith("run(") for c in scope.calls)  # left live on stop
+    # Monitoring free-runs (AUTO): it never arms a blocking SINGle trigger,
+    # and reads a coherent frame via stop → read → run each cycle.
+    assert "single" not in scope.calls
+    assert "stop" in scope.calls
+    assert any(isinstance(c, str) and c.startswith("run(") for c in scope.calls)
     assert scope.calls[-1] == "close"           # connection closed
 
 

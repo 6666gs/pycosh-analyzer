@@ -1,64 +1,80 @@
 # dbpd_analyzer
 
-**English** | [简体中文](README.zh-CN.md)
+[English](README.en.md) | **简体中文**
 
-Desktop UI for **dual-BPD correlated self-heterodyne (COSH)** laser
-frequency-noise analysis. PySide6 + matplotlib + the
-[pycosh](https://github.com/) reference implementation from Yuan et al.
-(*Opt. Express* **30**, 25147, 2022).
+**双 BPD 相关自外差（COSH）** 激光频率噪声分析的桌面 UI。PySide6 + matplotlib +
+来自 Yuan et al.（*Opt. Express* **30**, 25147, 2022）的
+[pycosh](https://github.com/) 参考实现。
 
-Apple-light visual style, cross-platform (macOS / Windows / Linux), with
-live oscilloscope acquisition (Siglent SDS7404), automatic linewidth
-extraction (Lorentzian + β-separation), and MZI FSR self-calibration.
+Apple 浅色风格，跨平台（macOS / Windows / Linux），支持示波器实时采集
+（Siglent SDS7404）、自动线宽提取（Lorentzian + β-separation）、MZI FSR 自校准。
 
 ---
 
-## Features
+## 功能特性
 
 | | |
 |---|---|
-| **Three data-source modes** | Single 3-column CSV · two-CSV (one per channel) · live acquire from Siglent SDS7404 over LAN |
-| **Multi-resolution Welch processing** | User-editable BW segments + offset-start ratio; multi-band averaging for low-noise floors |
-| **Live plot toggles** | S<sub>ν</sub> ↔ S<sub>φ</sub>, per-channel single PSD vs cross-correlation, error band |
-| **Auto-calibrate FSR** | Detect the MZI free-spectral range from a real beat trace (Welch + Savitzky-Golay + dip search) and back-solve fiber length |
-| **Lorentzian floor fit** | Minimum of S<sub>ν</sub>(f) over a chosen high-offset band → FWHM<sub>L</sub> = π · S<sub>0</sub> (single-sideband) |
-| **β-separation line + integration** | Di Domenico 2010 method — overlay β-line and report the Gaussian FWHM from the area above it |
-| **CSV export** | One click writes **both** frequency- and phase-noise spectra (all traces + error columns) to a single CSV with a full metadata header (delay, FSR, AOM, segments, linewidth fits) |
-| **Live monitoring** | After Acquire the scope resumes live; "▶ Monitor (live)" repeatedly acquires + processes single-shot frames, updating the spectrum and a Lorentz-linewidth-vs-time trend to watch laser lock stability |
+| **两种处理算法** | **BW 分段 · 双 BPD**（CoshXcorr 互相关，压制各 BPD 独立电学噪声）／ **多次平均 · 单 BPD（Hann 窗）**（多记录累积，逼近白噪声底） |
+| **两种数据源** | **文件读取**／**从示波器读取**（LAN 连接 Siglent SDS7404）。算法与数据源在数据面板上按"算法 Tab × 数据源"两轴选择 |
+| **多记录文件 I/O** | 多次平均可把采集的 N 条原始记录存进**一个 `.npz`**，之后离线重载、重新平均 |
+| **多分辨率 Welch 处理** | 可编辑 BW 分段 + offset-start ratio；多频段平均得到低噪声底（仅双 BPD 算法） |
+| **FSR 自校准 / 手动覆盖** | 从实际拍频信号检测 MZI 自由谱宽并反推光纤长度；也可手动输入光纤长度 ΔL / 延时 τ（**任意位数**，τ 与 ΔL 双向联动） |
+| **Lorentzian 底拟合** | 在指定高偏置带内取 S<sub>ν</sub>(f) 的最小值 → FWHM<sub>L</sub> = π · S<sub>0</sub>（单边谱） |
+| **β-separation 线 + 积分** | Di Domenico 2010 方法 —— 叠加 β 线并由其上方面积报告高斯 FWHM |
+| **导出 / 保存** | 双 BPD：**Export spectra** 把 S<sub>ν</sub>/S<sub>φ</sub>（全部曲线 + 误差列 + 元数据头）写入单个 CSV；平均：**Save averaged spectrum** 保存平均谱 + 线宽/FSR（CSV 或 npz） |
+| **实时监测**（仅双 BPD） | Acquire 后示波器自动恢复 live；"▶ Monitor (live)" 反复采集+处理单次帧，实时刷新噪声谱与 Lorentz 线宽-时间趋势，观察激光器锁定稳定性 |
 
 ---
 
-## Project layout
+## 两种处理算法
+
+数据面板左上是**算法选择**，下面的数据源与参数跟随当前算法：
+
+- **BW 分段 · 双 BPD（CoshXcorr）**：标准的相关自外差互相关法。需要两路 BPD
+  （C2/C4），用多分辨率 Welch 分段，互相关压掉两路各自的电学噪声。数据源：
+  - **文件读取** —— 一个 3 列文件 `t, BPD1, BPD2`（csv/npy/npz）
+  - **从示波器读取** —— 同时采两个通道
+- **多次平均 · 单 BPD（Hann 窗）**：单路 BPD，多次测量累积 `2·|rfft(Hann·相位)|²`，
+  除以 MZI 传递函数 `G(f) = 4·sin²(πfτ)`，多次平均逼近白频率噪声底。数据源：
+  - **从示波器读取** —— 连续采 N 次自动平均（可勾选"保留原始记录"以便保存）
+  - **文件读取** —— 读取一个含 N 条原始记录的多记录 `.npz`，离线复算平均
+
+> 平均算法是单条曲线、不用 BW 分段、也没有实时监测，所以切到该 Tab 时
+> Segments 区、互相关/双 BPD 显示项、Monitor 与 Export 按钮都会自动隐藏。
+
+---
+
+## 项目结构
 
 ```
 dbpd_analyzer/
-├── README.md
-├── LICENSE                  MIT (this project) + third-party notice
+├── README.md / README.en.md   主文档（中文）/ 英文链接
+├── LICENSE                  MIT（本项目）+ 第三方组件声明
 ├── requirements.txt
-├── main.py                  Entry point — Fusion style + global QSS + MainWindow
+├── main.py                  入口 —— Fusion style + 全局 QSS + MainWindow
 ├── app/
-│   ├── __init__.py
 │   ├── styles.py            Apple-light QSS
-│   ├── data_io.py           CSV load / array load / save
-│   ├── mzi_calibrate.py     FSR auto-calibration (Hilbert + Welch + dip search)
-│   ├── analysis.py          Lorentz floor fit + β-separation integration
-│   ├── scope.py             AcquireWorker (QThread) around SDS7404 driver
-│   ├── processor.py         CoshXcorr wrapper + ProcessWorker + CalibrateWorker
-│   ├── plot_widget.py       matplotlib FigureCanvas + analysis overlays
-│   ├── settings_panel.py    Sidebar: data / optical / segments / display / analysis
-│   └── main_window.py       Wires sidebar ↔ plot ↔ workers
-├── vendor/                  Vendored third-party dependencies (see vendor/README.md)
-│   ├── pycosh/              MIT, Maodong Gao 2022 — COSH reference implementation
-│   └── sds7404/             Siglent SDS7404A LAN driver
-└── examples/
-    ├── sample_data.csv      ~4 MB, 100k samples × 250 MSa/s × 3 columns
-    ├── make_sample_data.py  Regenerate from a longer source CSV
-    └── README.md            How to load + recommended BW_SEGMENT for this sample
+│   ├── data_io.py           CSV/npy/npz 加载与保存 + 多记录文件 I/O
+│   ├── averaging.py         多次平均（单 BPD Hann）：PsdAverager + 保存
+│   ├── mzi_calibrate.py     FSR 自动校准（Hilbert + Welch + 谷点搜索）
+│   ├── analysis.py          Lorentz 底拟合 + β-separation 积分
+│   ├── scope.py             采集 Worker（采集 / 多次平均 / 文件平均 / 连接测试）
+│   ├── processor.py         CoshXcorr 包装 + ProcessWorker + CalibrateWorker
+│   ├── monitor.py           实时监测 Worker
+│   ├── monitor_io.py        监测谱 / 趋势 落盘
+│   ├── plot_widget.py       matplotlib FigureCanvas + 分析叠加层
+│   ├── settings_panel.py    侧栏：data（算法×数据源）/ optical / segments / display / analysis
+│   └── main_window.py       连接侧栏 ↔ 绘图 ↔ Worker 各信号
+├── vendor/                  vendored 第三方依赖
+│   ├── pycosh/              MIT, Maodong Gao 2022 —— COSH 参考实现
+│   └── sds7404/             Siglent SDS7404A LAN 驱动（pyvisa）
+└── examples/                示例数据 + 说明
 ```
 
 ---
 
-## Setup
+## 安装
 
 ```bash
 git clone <repo-url>
@@ -67,237 +83,170 @@ python -m venv .venv
 .venv/bin/pip install -r requirements.txt
 ```
 
-That's it — `pycosh` and the `sds7404` driver are bundled under `vendor/`,
-so no extra paths or external repos to clone. The app adds `vendor/` to
-`sys.path` at import time.
+`pycosh` 和 `sds7404` 驱动已 vendor 在 `vendor/` 下，无需额外路径配置。应用在导入时会把
+`vendor/` 加入 `sys.path`。示波器连接走 **pyvisa-py**（纯 Python，随 requirements 安装），
+无需系统 NI-VISA。
 
-### Power-user overrides
+### 高级用户覆盖
 
-If you want to point at an external development checkout of either
-dependency (e.g. to track upstream pycosh), set:
+指向某个外部开发分支（比如跟踪上游 pycosh）：
 
 ```bash
 export DBPD_PYCOSH_PARENT=/path/to/folder-containing-pycosh
 export DBPD_SDS7404_PARENT=/path/to/folder-containing-sds7404
 ```
 
-The override takes effect after the bundled `vendor/` copy fails to import,
-not before, so a clean clone always works out of the box.
+覆盖只在 `vendor/` 内拷贝导入失败后才生效，所以全新克隆开箱即用。
 
-## Run
+## 运行
 
 ```bash
 .venv/bin/python main.py            # macOS / Linux
 .venv\Scripts\python.exe main.py    # Windows
 ```
 
-## Try the sample dataset
+---
 
-```bash
-# After running the GUI:
-# 1. sidebar mode → "Single CSV (3 columns: t, BPD1, BPD2)"
-# 2. Browse → examples/sample_data.csv
-# 3. Segments → change Bandwidth bins to:  10, 30, 100, 300, 1000, 3000, 10000
-#    (the bundled sample is only 400 µs long, so the default 1-kHz bin
-#     won't fit — see examples/README.md)
-# 4. ▶ Process
-```
+## 工作流
+
+### 模式 A —— 双 BPD（CoshXcorr）分析
+
+1. 数据面板顶部选 **BW 分段 · 双 BPD**
+2. 数据源选 **文件读取**（一个 3 列文件 `t, BPD1, BPD2`）或 **从示波器读取**（设 IP、
+   BPD1=C2、BPD2=C4，⏺ Acquire；后台 QThread 拉取，UI 不卡死，采完自动恢复 live）
+3. **Optical path**：填 n_core / AOM 载频；FSR 由数据自动校准，或勾 **Manual FSR**
+   手动输入光纤长度 ΔL / τ（任意位数）
+4. FSR 校准成功后**自动开始处理**；改了光路/分段后点 ▶ **Process** 重算
+5. **Analysis** 卡片实时显示 Lorentz FWHM 与 β-integrated Gaussian FWHM
+6. **Export spectra…** 导出含完整元数据头的单个 CSV（S<sub>ν</sub> 与 S<sub>φ</sub>、全部曲线 + 误差列）
+7. **▶ Monitor (live)**（先 Acquire 一次完成 FSR 校准后）反复抓取单次帧重处理，刷新噪声谱与
+   **Lorentz 线宽 vs 时间** 趋势条，确认 self-lock 激光器是否保持锁定
+
+### 模式 B —— 多次平均（单 BPD Hann）
+
+1. 数据面板顶部选 **多次平均 · 单 BPD (Hann)**
+2. 数据源 **从示波器读取**：设 IP、BPD1 通道、平均次数 N、边缘裁剪（Edge skip）；
+   勾 **保留原始记录** 可在平均后用 **Save raw records** 把 N 条原始记录存成一个 `.npz`
+3. 点 ▶ **Process**（或面板内的 Acquire ×N & average）：连续采 N 次，首帧自动标定 FSR
+   （或用手动 FSR），逐条累积平均
+4. 数据源 **文件读取**：选一个多记录 `.npz`（之前保存的 N 条原始记录），▶ Process 离线复算平均
+5. **Save averaged spectrum…** 保存平均谱 + n_avg/FSR/底噪/线宽（CSV 或 npz）
 
 ---
 
-## Workflow
+## 如何看噪声谱
 
-### Mode A — Analyze existing CSV
-
-1. Sidebar → **Data** → pick `Single CSV` or `Two CSVs` → Browse
-2. **Optical path** → set delay length / n_core / AOM carrier (or click *Auto-calibrate FSR* once data is loaded)
-3. **Segments** → leave defaults, or use the recommendation tables below
-4. Processing runs **automatically** once FSR calibration succeeds; after changing optical or segment settings, click ▶ **Process** to re-run
-5. **Analysis** card shows Lorentz FWHM and β-integrated Gaussian FWHM in real time; tweak the fit/integration bands to refine
-6. **Export spectra…** writes one CSV containing both S<sub>ν</sub> and S<sub>φ</sub> (all traces + error columns) with a full metadata header
-
-### Mode B — Live capture from oscilloscope
-
-1. Sidebar → **Data** → mode `Acquire from oscilloscope (SDS7404)`
-2. Set scope IP, BPD1 channel (default **C2**), BPD2 channel (default **C4**)
-3. ✓ *Send SINGle trigger before reading* if you want a fresh acquisition; uncheck to read whatever frame is on screen
-4. ⏺ **Acquire from scope** → background QThread pulls the frame (the scope resumes live acquisition automatically afterwards), no UI freeze
-5. (Optional) **Save acquired CSV…** to keep the raw record
-6. Proceed from step 3 of Mode A
-7. **▶ Monitor (live)** (after one Acquire has calibrated the FSR) repeatedly grabs a fresh single-shot frame and re-processes it, updating the spectrum and the **Lorentz FWHM vs time** trend strip below the plot — use it to confirm a self-lock laser stays locked. **■ Stop monitoring** ends the loop after the current frame.
+- **互相关曲线（蓝色）** 即激光噪声估计，两个 BPD 各自独立的电学噪声已被压制
+- **Lorentz 底（红虚线）** 是白色频率噪声的渐近线 → FWHM<sub>L</sub> = π · S<sub>0</sub>
+- **β 线（橙色点线）**：S<sub>ν</sub> = 8 ln(2) / π² · f ≈ 0.5615 · f。曲线在此线上方贡献高斯（慢）展宽，下方贡献洛伦兹（快）。上方积分面积给出 FWHM<sub>G</sub> = √(8 ln 2 · A)（Di Domenico 2010）
+- **高偏置处 n · FSR 的尖锐峰** 是 MZI 传递函数零点处的反卷积奇点（除以 `2sin²(πf/FSR)→0`），与窗函数无关；若与配置 FSR 不符会更明显 → 多半是光纤长度填错 → 点 *Auto-calibrate FSR* 或手动改 τ
 
 ---
 
-## How to read the spectrum
+## 测量推荐
 
-- **Cross-correlation curve (blue)** is the laser noise estimate with both BPDs' independent electronic noise suppressed
-- **Lorentz floor (red dashed)** is the white-frequency-noise asymptote → FWHM<sub>L</sub> = π · S<sub>0</sub>
-- **β-line (orange dotted)**: S<sub>ν</sub> = 8 ln(2) / π² · f ≈ 0.5615 · f. Above this line the noise contributes to the Gaussian (slow) line broadening; below, to the Lorentzian (fast) part. The integrated area gives FWHM<sub>G</sub> = √(8 ln 2 · A) (Di Domenico 2010)
-- **Sharp peaks at n · FSR** at high offsets are G(f) compensation artifacts when the actual FSR matches the configured one — they should map onto the Lorentz floor when calibration is correct; visible peaks usually mean your fiber length is off → click *Auto-calibrate FSR*
+下面是在 80 MHz AOM 自外差系统上收敛出来的配置。AOM 载频不同时按比例调整。
 
----
+### A —— 采样率怎么选
 
-## Measurement recommendations
-
-These are the configurations we converged on for an 80 MHz AOM
-self-heterodyne setup. Adapt the numbers if your AOM carrier differs.
-
-### A — Choosing the sample rate
-
-The Hilbert-based phase extraction loses validity when the analyzed
-offset frequency approaches the AOM carrier f<sub>c</sub>. The safe
-analysis ceiling is roughly **f<sub>c</sub> / 2** (sidebands stay
-unambiguous); above ~f<sub>c</sub> the Hilbert filter folds the lower
-sideband and the result is meaningless.
+当分析偏置频率接近 AOM 载频 f<sub>c</sub> 时，基于 Hilbert 的相位提取会失效。
+安全分析上限大约 **f<sub>c</sub> / 2**；超过 ~f<sub>c</sub>，Hilbert 滤波器会把下边带折回正频率，结果失真。
 
 ```
-sample_rate ≥ 2 · f_c          (Nyquist absolute minimum)
-sample_rate ≥ 2.5 · f_c        (recommended, leaves anti-alias margin)
+sample_rate ≥ 2 · f_c          (Nyquist 绝对下限)
+sample_rate ≥ 2.5 · f_c        (推荐, 给抗混叠滤波留余量)
 ```
 
-For **80 MHz AOM**: minimum **200 MSa/s**, comfortable **250 MSa/s**.
-Higher sample rates only waste memory.
+对 **80 MHz AOM**：最低 **200 MSa/s**，舒适 **250 MSa/s**。更高采样率只是浪费内存。
 
-### B — Choosing BW_SEGMENT
+### B —— BW_SEGMENT 怎么选（双 BPD 算法）
 
-The list `BW_SEGMENT = [bw₀, bw₁, …]` (in Hz) defines a multi-band
-Welch-style PSD estimate. Each band uses segment length
-`1 / (bw · dt)`. Constraints:
+列表 `BW_SEGMENT = [bw₀, bw₁, …]`（Hz）定义多频段 Welch 风格 PSD 估计，每段段长 `1 / (bw · dt)`。约束：
 
-| Quantity | Constraint | Why |
+| 量 | 约束 | 原因 |
 |---|---|---|
-| `bw[0]` | ≥ 5 / T | Need ≥ 5 segments at the lowest band for tolerable 1σ jitter (~45%) |
-| `bw[0] · ratio` | = f<sub>min</sub> (lowest analyzed offset) | Default `offset_start_ratio = 10` |
-| ratio between bands | 3× (smooth) or 10× (compact) | 3× gives ~1.7× SNR jumps at band boundaries; 10× gives ~3.2× |
-| `bw[-1]` | > 2/τ (= 2 · FSR) | Last band enters the incoherent limit so G(f) doesn't amplify single tones |
-| `bw[-1] · ratio` | < f<sub>c</sub> / 2 | Don't analyze past Hilbert's valid range |
+| `bw[0]` | ≥ 5 / T | 最低频段至少 5 段平均，1σ 抖动才压到 ~45% |
+| `bw[0] · ratio` | = f<sub>min</sub>（最低分析偏置） | 默认 `offset_start_ratio = 10` |
+| 段间比例 | 3×（平滑）或 10×（紧凑） | 3× 段界统计跳变 ~1.7×；10× 是 ~3.2× |
+| `bw[-1]` | > 2/τ（= 2 · FSR） | 最高段进入非相干极限，G(f) 不再放大单频干扰 |
+| `bw[-1] · ratio` | < f<sub>c</sub> / 2 | 不要分析到 Hilbert 失效区 |
 
-### C — Decision table for 80 MHz AOM, 7-10 m fiber
+### C —— 80 MHz AOM、7–10 m 光纤的决策表
 
-| Target | sample_rate | T | BW_SEGMENT (Hz) | offset range | Notes |
+| 目标 | sample_rate | T | BW_SEGMENT (Hz) | 偏置范围 | 备注 |
 |---|---:|---:|---|---:|---|
-| **Default** | 1 GSa/s | 5-10 ms | `1k, 3k, 10k, 30k, 100k, 300k, 1M, 3M, 10M` | 10 kHz – 30 MHz | Current working config |
-| Compact / fast | 2 GSa/s | 1-5 ms | `10k, 30k, 100k, 300k, 1M, 3M, 10M, 30M` | 100 kHz – 30 MHz | Trades low-freq for record speed |
-| Mid-band | 500 MSa/s | 0.5 s | `10, 30, 100, …, 10M` (12 bands) | 100 Hz – 30 MHz | Light acoustic isolation helpful |
-| **Low-freq** | **200-250 MSa/s** | **5-10 s** | `1, 3, 10, 30, 100, 300, 1k, …, 1e7` (14 bands) | **10 Hz – 30 MHz** | **Needs ≥ 1 GSa scope memory + 100 m fiber + acoustic isolation** |
-| Ultra-low-freq | 100-200 MSa/s | 60 s | `0.1, 0.3, 1, …, 1e6` | 1 Hz – 10 MHz | Multi-capture averaging required (single record will not fit in scope memory) |
+| **默认** | 1 GSa/s | 5–10 ms | `1k, 3k, 10k, 30k, 100k, 300k, 1M, 3M, 10M` | 10 kHz – 30 MHz | 当前工作配置 |
+| 紧凑/快速 | 2 GSa/s | 1–5 ms | `10k, 30k, 100k, 300k, 1M, 3M, 10M, 30M` | 100 kHz – 30 MHz | 牺牲低频换更快录波 |
+| 中频 | 500 MSa/s | 0.5 s | `10, 30, 100, …, 10M`（12 段） | 100 Hz – 30 MHz | 需要轻度声学隔离 |
+| **低频** | **200–250 MSa/s** | **5–10 s** | `1, 3, 10, 30, 100, 300, 1k, …, 1e7`（14 段） | **10 Hz – 30 MHz** | **需 ≥ 1 GSa 内存 + 100 m 光纤 + 声学隔离** |
+| 超低频 | 100–200 MSa/s | 60 s | `0.1, 0.3, 1, …, 1e6` | 1 Hz – 10 MHz | 必须多次采集平均（单次录波放不下） |
 
-### D — Memory math
+### D —— 内存换录波时长
 
-`record_time = memory_depth_per_channel / sample_rate`
+`录波时长 = 单通道内存深度 / 采样率`
 
-| Sample rate | 500 MSa scope | 1 GSa scope (option) | 2 GSa scope (option) |
+| 采样率 | 500 MSa | 1 GSa | 2 GSa |
 |---:|---:|---:|---:|
 | 500 MSa/s | 1.0 s | 2.0 s | 4.0 s |
 | 250 MSa/s | 2.0 s | 4.0 s | 8.0 s |
 | 200 MSa/s | 2.5 s | 5.0 s | 10.0 s |
 | 100 MSa/s | 5.0 s | 10.0 s | 20.0 s |
 
-For an 80 MHz AOM, **200 MSa/s is the practical floor** (below that
-the AOM carrier approaches the Nyquist edge), so the achievable T is
-fundamentally bounded by per-channel memory.
+对 80 MHz AOM，**200 MSa/s 是实际下限**，所以可达 T 从根本上被单通道内存所限。
 
-### E — Lowest reachable offset by hardware
+### E —— 硬件能到的最低偏置
 
-Using `bw[0] · T ≥ 5` and `sample_rate ≥ 200 MSa/s`:
+用 `bw[0] · T ≥ 5` 加 `sample_rate ≥ 200 MSa/s`：
 
-| Memory | Max T (@ 200 MSa/s) | Lowest f_min (single-shot) |
+| 内存 | 最大 T（@ 200 MSa/s）| 最低 f_min（单次录波）|
 |---:|---:|---:|
 | 500 MSa | 2.5 s | ≈ 20 Hz |
 | 1 GSa | 5 s | ≈ 10 Hz |
 | 2 GSa | 10 s | ≈ 5 Hz |
 
-To reach below this — **use multi-capture averaging** (see below).
+要再往下 —— 用**多次平均算法**（见上）。
 
 ---
 
-## Hardware checklist for low-frequency measurements
+## 低频测量的硬件清单
 
-These matter more than software tuning once you go below ~1 kHz offset:
+偏置低于 ~1 kHz 之后，这些比软件调参更重要：
 
-- **Delay fiber length** — short fiber (5-10 m) is fine above 10 kHz, but
-  for low-frequency offsets you need longer τ so G(f) doesn't crush the
-  signal below the BPD noise floor:
-  - 7-10 m: useful above 10 kHz offset
-  - 100 m: useful down to ~100 Hz offset (factor ~100 better low-freq sensitivity)
-  - 1 km: useful to ~1 Hz offset (Yuan 2022 used 1 km)
-- **Acoustic isolation** — long fiber picks up environmental vibration,
-  which masquerades as real frequency noise:
-  - Coil fiber inside a foam/sorbothane-lined box
-  - Place on a vibration-isolated optical table
-  - Kill HVAC / fans / pumps during measurement
-- **Thermal isolation** — temperature drift directly modulates fiber
-  delay; double-walled enclosure helps for very long records (> 10 s)
-- **AOM drive cleanness** — 80 MHz AOM driver harmonics or sidebands
-  show up directly in the spectrum; use a clean RF source
+- **延迟光纤长度** —— 短光纤（5–10 m）测 > 10 kHz 没问题；低频偏置需要更长 τ，否则 G(f) 把信号压到 BPD 噪声底以下：
+  - 7–10 m：> 10 kHz 偏置可用
+  - 100 m：低至 ~100 Hz 偏置可用（低频灵敏度 ~100×）
+  - 1 km：低至 ~1 Hz 偏置可用（Yuan 2022 用 1 km）
+- **声学隔离** —— 长光纤拾取环境振动，伪装成真实频率噪声：盘进泡沫/Sorbothane 盒、放隔振台、关空调/风扇/泵
+- **热隔离** —— 温漂直接调制光纤延迟；双层壁封装对超长录波（> 10 s）有帮助
+- **AOM 驱动干净度** —— 驱动器谐波/边带会直接进谱，用干净 RF 源
 
 ---
 
-## Future feature — multi-capture averaging
+## 示波器连接说明
 
-When the target offset goes below what one scope record can give
-(< ~10 Hz on 1 GSa memory), the planned solution is to capture
-**N independent records back-to-back** and average their cross-PSDs:
+驱动用 `pyvisa` 经 LAN 连接 SDS7404，**默认走 pyvisa-py（`@py`）后端**，资源串
+`TCPIP0::<ip>::inst0::INSTR`（VXI-11）。
 
-```
-Per-capture stats:    bw₀ · T → M segments,  1σ = 1/√M
-After N captures:     N · M segments,         1σ = 1/√(N · M)
-```
-
-So 10 captures of 2 s at bw = 1 Hz gives 20 segments — same noise floor
-as a single 20-second record but **without** needing a 4 GSa scope.
-
-### What it will look like
-
-Sidebar Acquire panel gets an additional **Average N captures** spin box
-(default 1). When N > 1, the worker loops:
-
-```
-for i in 1..N:
-    scope.single()              # fresh trigger
-    frame_i = scope.read_channels(...)
-    result_i = pycosh.process(frame_i)
-    psd12_accum += result_i.psd12 / N
-    progress(i / N)
-```
-
-Total wall-clock time ≈ N · (T + transfer_overhead). At 1 GSa/s
-record and Gb-LAN, transfer is roughly 10-20 s per pull, so 10 captures
-≈ 5-10 minutes; 100 captures ≈ 30-60 minutes.
-
-### Not yet implemented
-
-Single-capture analysis covers everything ≥ 10 Hz offset on 1 GSa memory,
-which is fine for current work. Add it later when the project
-genuinely needs ≤ 1 Hz offset measurements.
+- macOS 上系统 **NI-VISA 偶发卡死在 open_resource**（VXI-11 协商与 Siglent 实现不完全兼容），所以默认不用它；要强制用可传 `visa_backend="@ivi"` 或自带 `resource_manager`。
+- 若 VXI-11 报 `VI_ERROR_RSRC_NFOUND`，多半是上次会话异常退出占住了 VXI-11 link 槽（重启示波器即可清除），或示波器 LXI/VXI-11 未启用。
+- 数据面板有 **Test connection** 按钮可先验证连通（`*IDN?`）。
 
 ---
 
-## Algorithm notes (pycosh)
+## 算法说明（pycosh）
 
-For the underlying maths — Hilbert phase extraction, multi-band Welch
-PSD, G(f) sinc² compensation (paper Eq. 22), and cross-correlation
-suppression of BPD noise (paper Eq. 27-28) — see `pycosh/CoshXcorr.py`
-and the Yuan 2022 paper. Two non-obvious points:
+底层数学 —— Hilbert 相位提取、多频段 Welch PSD、G(f) sinc² 补偿（论文 Eq. 22）、互相关压制 BPD 噪声（Eq. 27–28）—— 见 `vendor/pycosh/CoshXcorr.py` 与 Yuan 2022 论文。两点不直观：
 
-- The AOM carrier frequency is **not** a parameter; pycosh implicitly
-  rejects it by skipping the DC bin (offsets start at
-  `offset_start_ratio · bw[0]`)
-- The app displays **single-sideband (SSB)** spectral densities: pycosh
-  emits a two-sided PSD, which the app multiplies by 2 for display. In this
-  convention Lorentz FWHM = π · S<sub>0</sub> and the β-line is 8 ln2/π² · f
-  (Di Domenico 2010, one-sided)
-
-The algorithm itself was numerically verified against simulated white-
-frequency-noise lasers — see [verify_pycosh.py](../sds7404/verify_pycosh.py)
-in the sister repo for the test.
+- AOM 载频**不是**参数；pycosh 跳过 DC bin 隐式排除（偏置从 `offset_start_ratio · bw[0]` 开始）
+- 应用显示**单边谱（SSB）**：pycosh 输出双边谱，应用乘 2 显示。该约定下 Lorentz FWHM = π · S<sub>0</sub>，β 线为 8 ln2/π² · f（Di Domenico 2010，单边）
+- CoshXcorr 用**矩形窗**（原论文方法）；多次平均算法用 **Hann 窗**——两者刻意不同
 
 ---
 
-## License
+## 协议
 
-MIT — see [LICENSE](LICENSE).
+MIT —— 见 [LICENSE](LICENSE)。
 
-Bundled vendored components keep their own licensing:
+vendor 内第三方组件保留各自协议：
 - `vendor/pycosh/`  MIT, Copyright (c) 2022 Maodong Gao
-- `vendor/sds7404/`  MIT (this project)
+- `vendor/sds7404/`  MIT（本项目）

@@ -88,10 +88,14 @@ class SDS7404:
         host: str,
         timeout_ms: int = DEFAULT_TIMEOUT_MS,
         resource_manager: pyvisa.ResourceManager | None = None,
+        visa_backend: str = "@py",
         connect_retries: int = 3,
         connect_retry_delay_s: float = 2.0,
     ) -> None:
-        self._rm = resource_manager or pyvisa.ResourceManager()
+        # 默认走 pyvisa-py(纯 Python VXI-11)。macOS 上的 NI-VISA 偶发卡在
+        # open_resource —— 它的 VXI-11 协商和 Siglent 实现不完全兼容(实测会挂死)。
+        # 若需要用 NI-VISA,显式传 visa_backend="@ivi" 或自带 resource_manager。
+        self._rm = resource_manager or pyvisa.ResourceManager(visa_backend)
         resource = f"TCPIP0::{host}::inst0::INSTR"
         # 上一会话异常退出后,Siglent VXI-11 服务器有时会拒新连(VI_ERROR_RSRC_NFOUND),
         # 短暂等待后通常自行释放。

@@ -33,6 +33,7 @@ recommends the best candidate.
     τ    ≈ 1 / FSR                                  ≈ 1957 ns
     20 m would give FSR ≈ 10.16 MHz, τ ≈ 98 ns.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -73,22 +74,22 @@ def _run(
     n_samples = v.size
     duration_ms = n_samples / sr * 1e3
 
-    print(f"Signal   : {n_samples:,} samples  |  "
-          f"{sr/1e6:.3f} MSa/s  |  {duration_ms:.3f} ms")
+    print(
+        f"Signal   : {n_samples:,} samples  |  "
+        f"{sr/1e6:.3f} MSa/s  |  {duration_ms:.3f} ms"
+    )
 
     # Welch PSD of instantaneous frequency (identical to calibrate_mzi).
     v_f64 = np.asarray(v, dtype=np.float64)
     v_f64 -= v_f64.mean()
-    inst_freq = (
-        np.diff(np.unwrap(np.angle(sg.hilbert(v_f64))))
-        * sr / (2 * np.pi)
-    )
+    inst_freq = np.diff(np.unwrap(np.angle(sg.hilbert(v_f64)))) * sr / (2 * np.pi)
     carrier = float(inst_freq.mean())
     freq, psd = sg.welch(inst_freq - carrier, fs=sr, nperseg=nperseg)
 
     print(f"Carrier  : {carrier/1e6:.4f} MHz")
-    print(f"PSD freq resolution: {freq[1] - freq[0]:.2f} Hz  "
-          f"(nperseg={nperseg:,})\n")
+    print(
+        f"PSD freq resolution: {freq[1] - freq[0]:.2f} Hz  " f"(nperseg={nperseg:,})\n"
+    )
 
     search_hi = 0.9 * carrier
     band = (freq >= search_lo) & (freq <= search_hi)
@@ -112,17 +113,17 @@ def _run(
         return
 
     # Reference lengths for orientation
-    print(f"{'Rank':<5} {'FSR (MHz)':<12} {'τ (ns)':<12} "
-          f"{'ΔL (m)':<12} {'Contrast':<10} {'Notes'}")
+    print(
+        f"{'Rank':<5} {'FSR (MHz)':<12} {'τ (ns)':<12} "
+        f"{'ΔL (m)':<12} {'Contrast':<10} {'Notes'}"
+    )
     print("-" * 65)
 
-    for rank, (dip_idx, prom) in enumerate(
-        zip(dips, props["prominences"]), start=1
-    ):
+    for rank, (dip_idx, prom) in enumerate(zip(dips, props["prominences"]), start=1):
         fsr = float(fb[dip_idx])
         tau_ns = 1e9 / fsr
         dl_m = C_LIGHT / (n_core * fsr)
-        contrast = 10 ** prom
+        contrast = 10**prom
 
         notes = ""
         if rank == 1:
@@ -132,8 +133,10 @@ def _run(
         elif 15 <= dl_m <= 25:
             notes += "  (≈20 m, MATLAB reference length)"
 
-        print(f"{rank:<5} {fsr/1e6:<12.4f} {tau_ns:<12.1f} "
-              f"{dl_m:<12.2f} {contrast:<10.1f} {notes}")
+        print(
+            f"{rank:<5} {fsr/1e6:<12.4f} {tau_ns:<12.1f} "
+            f"{dl_m:<12.2f} {contrast:<10.1f} {notes}"
+        )
 
     print()
 
@@ -162,11 +165,13 @@ def _run(
         print()
 
     # Diagnosis for the 20 m vs 400 m discrepancy
-    app_fsr = best_fsr          # what the app would report (first dip)
+    app_fsr = best_fsr  # what the app would report (first dip)
     app_dl = best_dl
     print(f"App would report (first-dip rule):")
-    print(f"  FSR = {app_fsr/1e6:.4f} MHz  →  ΔL ≈ {app_dl:.2f} m  "
-          f"(τ = {1e9/app_fsr:.1f} ns)")
+    print(
+        f"  FSR = {app_fsr/1e6:.4f} MHz  →  ΔL ≈ {app_dl:.10f} m  "
+        f"(τ = {1e9/app_fsr:.10f} ns)"
+    )
 
     # If the first dip is far from 400 m, look for a lower dip that is.
     if app_dl < 50:
@@ -186,11 +191,15 @@ def _run(
             print(f"      (or τ = {1e9/cf:.1f} ns, ΔL = {cdl:.2f} m)\n")
         else:
             _expected = target_fsr / 1e6
-            print(f"\n  No dip near 400 m FSR ({_expected:.3f} MHz) found "
-                  f"in the searched band.")
+            print(
+                f"\n  No dip near 400 m FSR ({_expected:.3f} MHz) found "
+                f"in the searched band."
+            )
             print(f"  Possible reasons:")
-            print(f"    • The 400 m FSR ({_expected:.3f} MHz) is below "
-                  f"search_lo ({search_lo/1e6:.3f} MHz).")
+            print(
+                f"    • The 400 m FSR ({_expected:.3f} MHz) is below "
+                f"search_lo ({search_lo/1e6:.3f} MHz)."
+            )
             print(f"      Re-run with --search_lo {int(target_fsr*0.5)}")
             print(f"    • The record is too short for the Welch resolution to")
             print(f"      separate {_expected:.3f} MHz from nearby peaks.")
@@ -212,40 +221,55 @@ def _plot(fb, pb, logp_s, dips, props, n_core, search_lo) -> None:
         return
 
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
-    fig.suptitle("MZI delay diagnostic — instantaneous-frequency PSD",
-                 fontsize=13)
+    fig.suptitle("MZI delay diagnostic — instantaneous-frequency PSD", fontsize=13)
 
-    ax1.semilogy(fb / 1e6, pb, color="#007AFF", linewidth=0.8, alpha=0.7,
-                 label="PSD (Welch)")
+    ax1.semilogy(
+        fb / 1e6, pb, color="#007AFF", linewidth=0.8, alpha=0.7, label="PSD (Welch)"
+    )
     if len(dips):
-        ax1.semilogy(fb[dips] / 1e6, pb[dips], "v", color="#FF3B30",
-                     markersize=8, label="Dips (MZI zeros)")
+        ax1.semilogy(
+            fb[dips] / 1e6,
+            pb[dips],
+            "v",
+            color="#FF3B30",
+            markersize=8,
+            label="Dips (MZI zeros)",
+        )
         for i, (di, prom) in enumerate(zip(dips, props["prominences"]), 1):
             fsr = float(fb[di])
             dl = C_LIGHT / (n_core * fsr)
-            ax1.annotate(f"#{i}\n{fsr/1e6:.3f} MHz\n{dl:.1f} m",
-                         xy=(fb[di] / 1e6, pb[di]),
-                         xytext=(fb[di] / 1e6, pb[di] * 3),
-                         fontsize=7, ha="center",
-                         arrowprops=dict(arrowstyle="-", color="#333"))
+            ax1.annotate(
+                f"#{i}\n{fsr/1e6:.3f} MHz\n{dl:.1f} m",
+                xy=(fb[di] / 1e6, pb[di]),
+                xytext=(fb[di] / 1e6, pb[di] * 3),
+                fontsize=7,
+                ha="center",
+                arrowprops=dict(arrowstyle="-", color="#333"),
+            )
 
     ax1.set_ylabel("PSD  (arbitrary)", fontsize=10)
     ax1.legend(fontsize=9)
     ax1.grid(True, which="both", alpha=0.25)
 
-    ax2.plot(fb / 1e6, logp_s, color="#34C759", linewidth=0.9,
-             label="log₁₀(PSD) smoothed")
+    ax2.plot(
+        fb / 1e6, logp_s, color="#34C759", linewidth=0.9, label="log₁₀(PSD) smoothed"
+    )
     if len(dips):
-        ax2.plot(fb[dips] / 1e6, logp_s[dips], "v", color="#FF3B30",
-                 markersize=8)
+        ax2.plot(fb[dips] / 1e6, logp_s[dips], "v", color="#FF3B30", markersize=8)
     ax2.set_xlabel("Frequency  (MHz)", fontsize=10)
     ax2.set_ylabel("log₁₀(PSD)  smoothed", fontsize=10)
     ax2.legend(fontsize=9)
     ax2.grid(True, which="both", alpha=0.25)
 
     for ax in (ax1, ax2):
-        ax.axvline(search_lo / 1e6, color="#FF9500", linewidth=1,
-                   linestyle=":", alpha=0.7, label="search_lo")
+        ax.axvline(
+            search_lo / 1e6,
+            color="#FF9500",
+            linewidth=1,
+            linestyle=":",
+            alpha=0.7,
+            label="search_lo",
+        )
 
     fig.tight_layout()
     plt.show()
@@ -257,16 +281,28 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    parser.add_argument("data_file", type=Path,
-                        help="CSV / npy / npz data file.")
-    parser.add_argument("--n_core", type=float, default=1.468,
-                        help="Fiber effective index (default 1.468).")
-    parser.add_argument("--search_lo", type=float, default=100_000.0,
-                        help="Lower FSR search bound in Hz (default 100000).")
-    parser.add_argument("--nperseg", type=int, default=524_288,
-                        help="Welch segment length (default 524288).")
-    parser.add_argument("--plot", action="store_true",
-                        help="Display annotated PSD plot.")
+    parser.add_argument("data_file", type=Path, help="CSV / npy / npz data file.")
+    parser.add_argument(
+        "--n_core",
+        type=float,
+        default=1.468,
+        help="Fiber effective index (default 1.468).",
+    )
+    parser.add_argument(
+        "--search_lo",
+        type=float,
+        default=100_000.0,
+        help="Lower FSR search bound in Hz (default 100000).",
+    )
+    parser.add_argument(
+        "--nperseg",
+        type=int,
+        default=524_288,
+        help="Welch segment length (default 524288).",
+    )
+    parser.add_argument(
+        "--plot", action="store_true", help="Display annotated PSD plot."
+    )
     args = parser.parse_args()
 
     _run(

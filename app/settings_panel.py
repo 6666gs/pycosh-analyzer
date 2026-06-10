@@ -6,6 +6,7 @@ from enum import Enum, auto
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QDoubleValidator
 
 from .data_io import is_data_path
 from PySide6.QtWidgets import (
@@ -648,23 +649,26 @@ class OpticalSection(QFrame):
         self.manual_check = QCheckBox("Manual FSR (set fiber length / τ)")
         self.manual_check.toggled.connect(self._on_manual_toggled)
 
-        self.manual_len = NoWheelDoubleSpinBox()
-        self.manual_len.setRange(0.001, 100_000.0)
-        self.manual_len.setSuffix(" m")
-        self.manual_len.setDecimals(4)
-        self.manual_len.setToolTip("MZI path-length difference ΔL.")
-        self.manual_len.valueChanged.connect(self._on_len_changed)
+        # Free-text numeric fields (not spin boxes): the user wants to enter τ
+        # to arbitrary precision, e.g. 2148.7212507054 ns — a QDoubleSpinBox
+        # would round to its fixed `decimals` and pad trailing zeros.
+        self.manual_len = QLineEdit()
+        self.manual_len.setValidator(self._make_float_validator())
+        self.manual_len.setPlaceholderText("ΔL")
+        self.manual_len.setToolTip("MZI path-length difference ΔL, in metres "
+                                   "(any number of digits).")
+        self.manual_len.editingFinished.connect(self._on_len_changed)
         _shrinkable(self.manual_len)
 
-        self.manual_tau = NoWheelDoubleSpinBox()
-        self.manual_tau.setRange(0.1, 100_000.0)
-        self.manual_tau.setSuffix(" ns")
-        self.manual_tau.setDecimals(1)
-        self.manual_tau.setValue(100.0)
-        self.manual_tau.setToolTip("Delay-line round-trip time τ = 1/FSR.")
-        self.manual_tau.valueChanged.connect(self._on_tau_changed)
+        self.manual_tau = QLineEdit()
+        self.manual_tau.setValidator(self._make_float_validator())
+        self.manual_tau.setPlaceholderText("τ")
+        self.manual_tau.setToolTip("Delay-line round-trip time τ = 1/FSR, in ns "
+                                   "(any number of digits).")
+        self.manual_tau.editingFinished.connect(self._on_tau_changed)
         _shrinkable(self.manual_tau)
 
+        self.manual_tau.setText("100")
         self._sync_len_from_tau()                 # initialise ΔL from the default τ
         self.manual_len.setEnabled(False)
         self.manual_tau.setEnabled(False)
@@ -693,9 +697,11 @@ class OpticalSection(QFrame):
         manual_row.setSpacing(6)
         manual_row.addWidget(QLabel("ΔL"))
         manual_row.addWidget(self.manual_len, 1)
+        manual_row.addWidget(QLabel("m"))
         manual_row.addSpacing(8)
         manual_row.addWidget(QLabel("τ"))
         manual_row.addWidget(self.manual_tau, 1)
+        manual_row.addWidget(QLabel("ns"))
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 10, 12, 10)
@@ -715,7 +721,46 @@ class OpticalSection(QFrame):
     @property
     def manual_fsr_hz(self) -> float:
         """FSR implied by the manual τ field (= 1/τ; ΔL gives the same value)."""
-        return 1.0 / (self.manual_tau.value() * 1e-9)
+        tau_ns = self.tau_ns()
+        if tau_ns <= 0.0:                 # empty / invalid → avoid div-by-zero
+            tau_ns = 100.0
+        return 1.0 / (tau_ns * 1e-9)
+
+    # ---- numeric field helpers (τ / ΔL are free-text, arbitrary precision) ----
+    @staticmethod
+    def _make_float_validator() -> QDoubleValidator:
+        v = QDoubleValidator(0.0, 1.0e18, 1000)   # decimals=1000 → effectively no limit
+        v.setNotation(QDoubleValidator.Notation.StandardNotation)
+        return v
+
+    @staticmethod
+    def _fmt(value: float) -> str:
+        # repr gives the shortest exact round-trip string (no trailing zeros).
+        return repr(float(value))
+
+    def tau_ns(self) -> float:
+        """Parsed τ in ns (0.0 when the field is empty / invalid)."""
+        try:
+            return float(self.manual_tau.text())
+        except (TypeError, ValueError):
+            return 0.0
+
+    def len_m(self) -> float:
+        """Parsed ΔL in metres (0.0 when the field is empty / invalid)."""
+        try:
+            return float(self.manual_len.text())
+        except (TypeError, ValueError):
+            return 0.0
+
+    def set_tau_ns(self, value: float) -> None:
+        """Set τ and run the link (ΔL recompute + display refresh)."""
+        self.manual_tau.setText(self._fmt(value))
+        self._on_tau_changed()
+
+    def set_len_m(self, value: float) -> None:
+        """Set ΔL and run the link (τ recompute + display refresh)."""
+        self.manual_len.setText(self._fmt(value))
+        self._on_len_changed()
 
     @property
     def is_calibrated(self) -> bool:
@@ -762,14 +807,14 @@ class OpticalSection(QFrame):
     # ---- length <-> τ linking ----
     def _sync_len_from_tau(self) -> None:
         self._syncing = True
-        dl = self.manual_tau.value() * 1e-9 * C_LIGHT / self.n_core.value()
-        self.manual_len.setValue(dl)
+        dl = self.tau_ns() * 1e-9 * C_LIGHT / self.n_core.value()
+        self.manual_len.setText(self._fmt(dl))
         self._syncing = False
 
     def _sync_tau_from_len(self) -> None:
         self._syncing = True
-        tau_ns = self.manual_len.value() * self.n_core.value() / C_LIGHT * 1e9
-        self.manual_tau.setValue(tau_ns)
+        tau_ns = self.len_m() * self.n_core.value() / C_LIGHT * 1e9
+        self.manual_tau.setText(self._fmt(tau_ns))
         self._syncing = False
 
     def _on_tau_changed(self) -> None:
@@ -1331,6 +1376,9 @@ class SettingsPanel(QWidget):
         self._section_boxes["Segments"].setVisible(not is_avg)
         self.display.set_single_bpd(is_avg)
         self._monitor_row_widget.setVisible(not is_avg)
+        # "Export spectra" exports the dual-BPD CoshXcorr result; averaging has
+        # its own "Save averaged spectrum", so hide Export to avoid confusion.
+        self.export_btn.setVisible(not is_avg)
         # Rollback (a monitoring feature) is hidden under averaging; back on
         # XCORR, restore it only if recent frames actually exist.
         self.rollback_group.setVisible(

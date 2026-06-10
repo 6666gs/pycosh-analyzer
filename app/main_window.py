@@ -78,6 +78,11 @@ class MainWindow(QMainWindow):
         self.resize(1380, 980)
 
         self._data: DualBpdData | None = None
+        # Path that self._data was loaded from (None when it came from the scope
+        # or nothing is loaded). Lets _on_file_changed skip a redundant reload +
+        # re-analysis when the file source is re-selected but the file is the
+        # same — switching source tabs must NOT restart the auto-analysis.
+        self._loaded_file: Path | None = None
         self._result: ProcessResult | None = None
         self._proc_worker: ProcessWorker | None = None
         self._cal_worker: CalibrateWorker | None = None
@@ -208,12 +213,18 @@ class MainWindow(QMainWindow):
         if not f1:
             self._reset_loaded_data()
             return
+        # Re-selecting the file source with the same file already loaded (e.g.
+        # toggling scope→file) must not reload or re-run the analysis — that
+        # re-process can freeze the UI on a large record.
+        if f1 == self._loaded_file and self._data is not None:
+            return
         try:
             self._data = load_record(f1)
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, "Load error", str(exc))
             return
 
+        self._loaded_file = f1
         self._update_data_info()
         self.settings.data.mark_acquired(False)
         self._kick_off_autocal()
@@ -221,6 +232,7 @@ class MainWindow(QMainWindow):
     def _reset_loaded_data(self) -> None:
         """Drop any loaded data and lock Process again."""
         self._data = None
+        self._loaded_file = None
         self.settings.data.set_info("No data loaded.")
         self.settings.optical.reset_calibration()
         self.settings.set_calibrated(False)
@@ -234,7 +246,7 @@ class MainWindow(QMainWindow):
             self.settings.set_calibrated(True)
             self.statusBar().showMessage(
                 f"Using manual FSR = {opt.manual_fsr_hz / 1e6:.4f} MHz "
-                f"(τ = {opt.manual_tau.value():.1f} ns).")
+                f"(τ = {opt.tau_ns():.1f} ns).")
             self._start_process()
             return
         opt.reset_calibration()
@@ -252,7 +264,7 @@ class MainWindow(QMainWindow):
             # then clicks Process. The button stays enabled meanwhile.
             self.statusBar().showMessage(
                 f"Manual FSR = {opt.manual_fsr_hz / 1e6:.4f} MHz "
-                f"(τ = {opt.manual_tau.value():.1f} ns). Click Process to apply.")
+                f"(τ = {opt.tau_ns():.1f} ns). Click Process to apply.")
         else:
             self.settings.set_calibrated(False)
             if self._data is not None:
@@ -485,6 +497,7 @@ class MainWindow(QMainWindow):
         t, v1, v2, sr = frame_to_arrays(frame, ch1, ch2)
         label = f"scope@{dt.datetime.now().strftime('%H:%M:%S')}"
         self._data = from_arrays(t, v1, v2, sr, label=label)
+        self._loaded_file = None        # data is now from the scope, not a file
         chs = ch1 + (f" + {ch2}" if ch2 else "")
         self._update_data_info(extra=f"From scope · {chs}")
         self.settings.data.mark_acquired(True)
@@ -924,7 +937,7 @@ class MainWindow(QMainWindow):
                 "accurate result. Using the τ field value for now.",
             )
             self.statusBar().showMessage(
-                f"No FSR dip found — using τ = {opt.manual_tau.value():.1f} ns. "
+                f"No FSR dip found — using τ = {opt.tau_ns():.1f} ns. "
                 f"Set 'Manual FSR' for accuracy."
             )
             self._start_process()

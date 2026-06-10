@@ -132,7 +132,7 @@ def test_calibration_failure_prompts_and_uses_tau_without_locking(qtbot, monkeyp
     prompts = []
     monkeypatch.setattr("app.main_window.QMessageBox.information",
                         lambda *a, **k: prompts.append(a))
-    win.settings.optical.manual_tau.setValue(50.0)     # 50 ns → 20 MHz
+    win.settings.optical.set_tau_ns(50.0)     # 50 ns → 20 MHz
 
     class _Res:
         fsr_hz = None           # no dip detected
@@ -156,7 +156,7 @@ def test_manual_override_takes_priority(qtbot):
     win = MainWindow()
     qtbot.addWidget(win)
     opt = win.settings.optical
-    opt.manual_tau.setValue(40.0)          # 40 ns → 25 MHz
+    opt.set_tau_ns(40.0)          # 40 ns → 25 MHz
     opt.manual_check.setChecked(True)
 
     assert opt.manual_enabled
@@ -173,15 +173,15 @@ def test_manual_length_and_tau_stay_linked(qtbot):
     n = opt.n_core.value()
     C = 299_792_458.0
 
-    opt.manual_tau.setValue(100.0)                       # 100 ns
+    opt.set_tau_ns(100.0)                       # 100 ns
     expected_len = 100.0e-9 * C / n
-    assert np.isclose(opt.manual_len.value(), expected_len, rtol=1e-4)
+    assert np.isclose(opt.len_m(), expected_len, rtol=1e-4)
 
-    opt.manual_len.setValue(10.0)                        # 10 m
+    opt.set_len_m(10.0)                        # 10 m
     expected_tau = 10.0 * n / C * 1e9
     # τ spinbox rounds to 0.1 ns, so allow one decimal step of slack.
-    assert np.isclose(opt.manual_tau.value(), expected_tau, atol=0.1)
-    assert opt.manual_tau.value() != 100.0               # actually changed (linked)
+    assert np.isclose(opt.tau_ns(), expected_tau, atol=0.1)
+    assert opt.tau_ns() != 100.0               # actually changed (linked)
 
 
 def test_kick_off_autocal_uses_manual_without_calibrating(qtbot, monkeypatch):
@@ -194,7 +194,7 @@ def test_kick_off_autocal_uses_manual_without_calibrating(qtbot, monkeypatch):
     monkeypatch.setattr(win, "_start_process", lambda: processed.append(True))
     monkeypatch.setattr(win, "_start_calibrate",
                         lambda **k: calibrated.append(True))
-    win.settings.optical.manual_tau.setValue(40.0)
+    win.settings.optical.set_tau_ns(40.0)
     win.settings.optical.manual_check.setChecked(True)  # _data is None → no process yet
     win._data = object()  # presence is enough; manual path doesn't read it
 
@@ -222,7 +222,7 @@ def test_process_stays_enabled_after_manual_length_change(qtbot, monkeypatch):
     win.settings.optical.manual_check.setChecked(True)
     assert win.settings.process_btn.isEnabled() is True
 
-    win.settings.optical.manual_len.setValue(400.0)
+    win.settings.optical.set_len_m(400.0)
     assert win.settings.process_btn.isEnabled() is True
     # The new length actually drives the resolved FSR/τ used by Process.
     assert win.settings.optical.delay_freq_hz < 1e6      # 400 m → ~0.5 MHz FSR
@@ -519,11 +519,14 @@ def test_average_mode_toggles_controls(qtbot):
     assert "average" in d.acquire_btn.text().lower()
     assert sp._section_boxes["Segments"].isHidden()
     assert sp._monitor_row_widget.isHidden()
+    # Export spectra is dual-BPD-only → hidden under averaging.
+    assert sp.export_btn.isHidden()
 
     d.select_algorithm(ALGO_XCORR)
     assert d._grp_avg_params.isHidden()
     assert not sp._section_boxes["Segments"].isHidden()
     assert not sp._monitor_row_widget.isHidden()
+    assert not sp.export_btn.isHidden()
 
 
 def test_start_average_without_manual_fsr_spawns_worker_with_none_fsr(qtbot, monkeypatch):
@@ -572,7 +575,7 @@ def test_start_average_spawns_worker_with_resolved_fsr(qtbot, monkeypatch):
     sp.data.select_algorithm(ALGO_AVERAGE)
     sp.data.select_source(SRC_SCOPE)
     sp.data.scope_ip.setText("1.2.3.4")
-    sp.optical.manual_tau.setValue(100.0)          # 100 ns → 10 MHz
+    sp.optical.set_tau_ns(100.0)          # 100 ns → 10 MHz
     sp.optical.manual_check.setChecked(True)
     captured = {}
 
@@ -857,3 +860,61 @@ def test_rollback_group_restored_when_returning_to_xcorr(qtbot):
 
     sp.data.select_algorithm(ALGO_XCORR)
     assert sp.rollback_group.isHidden() is False       # restored (frames remain)
+
+
+def test_source_toggle_does_not_reload_or_reanalyze(qtbot, monkeypatch):
+    """Toggling the data source (file→scope→file) with the same file already
+    loaded must NOT reload it or restart the auto-analysis (regression: that
+    re-process froze the UI on large records)."""
+    from pathlib import Path
+
+    from app.data_io import DualBpdData
+    from app.main_window import MainWindow
+    from app.settings_panel import SRC_FILE, SRC_SCOPE
+
+    win = MainWindow()
+    qtbot.addWidget(win)
+
+    t = np.arange(64) / 1e6
+    fake = DualBpdData(t=t, v1=np.sin(t), v2=np.cos(t),
+                       sample_rate=1e6, source_files=())
+    counts = {"load": 0, "autocal": 0}
+
+    def _fake_load(path):
+        counts["load"] += 1
+        return fake
+
+    monkeypatch.setattr("app.main_window.load_record", _fake_load)
+    monkeypatch.setattr(win, "_kick_off_autocal",
+                        lambda: counts.__setitem__("autocal", counts["autocal"] + 1))
+
+    d = win.settings.data            # defaults to (XCORR, FILE)
+    d._set_file1(Path("/tmp/rec.csv"))
+    d.fileChanged.emit()
+    assert counts == {"load": 1, "autocal": 1}     # loaded + analyzed once
+
+    d.select_source(SRC_SCOPE)        # → scope source (no file work)
+    d.select_source(SRC_FILE)         # → back to file, SAME file
+    assert counts == {"load": 1, "autocal": 1}     # NOT reloaded / re-analyzed
+
+
+def test_manual_tau_accepts_arbitrary_precision(qtbot):
+    """The manual τ field is free-text, so a value like 2148.7212507054 ns is
+    kept to full precision (no spin-box decimals rounding) and flows into FSR."""
+    import math
+
+    from app.main_window import MainWindow
+
+    win = MainWindow()
+    qtbot.addWidget(win)
+    opt = win.settings.optical
+    opt.manual_check.setChecked(True)
+
+    # User types a 10-decimal τ directly into the field, then commits it.
+    opt.manual_tau.setText("2148.7212507054")
+    opt.manual_tau.editingFinished.emit()
+
+    assert opt.tau_ns() == 2148.7212507054                 # exact, not rounded
+    assert opt.manual_tau.text() == "2148.7212507054"      # display unchanged
+    assert math.isclose(opt.manual_fsr_hz, 1.0 / (2148.7212507054e-9),
+                        rel_tol=1e-12)

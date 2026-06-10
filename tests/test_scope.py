@@ -30,12 +30,16 @@ def test_driver_run_continuous_sets_auto_then_run():
     class FakeRM:
         def __init__(self):
             self.instr = FakeInstr()
+            self.last_resource = None
 
-        def open_resource(self, resource):
+        def open_resource(self, resource, **kwargs):
+            self.last_resource = resource
             return self.instr
 
     rm = FakeRM()
     scope = SDS7404("1.2.3.4", resource_manager=rm)
+    # Connects over VXI-11 (TCPIP INSTR).
+    assert "inst0::INSTR" in rm.last_resource
     rm.instr.writes.clear()
 
     scope.run()  # continuous=True default
@@ -294,3 +298,35 @@ def test_average_file_worker_auto_calibrates_when_fsr_none(qtbot, tmp_path, monk
     final, _ = results[0]
     assert final.fsr_hz == 2e6
     assert len(calls) == 1          # calibrated from the FIRST record only
+
+
+def test_driver_defaults_to_pyvisa_py_backend(monkeypatch):
+    """The driver builds its ResourceManager with the pyvisa-py ('@py') backend
+    by default over VXI-11 (TCPIP INSTR). The system NI-VISA backend hangs on
+    open with some Siglent scopes on macOS, so it must not be the default."""
+    import pyvisa
+
+    from sds7404 import SDS7404
+
+    created = {}
+    opened = {}
+
+    class _FakeScope:
+        def write(self, cmd):
+            pass
+
+    class _FakeRM:
+        def __init__(self, spec=None):
+            created["spec"] = spec
+
+        def open_resource(self, resource, **kwargs):
+            opened["resource"] = resource
+            return _FakeScope()
+
+    monkeypatch.setattr(pyvisa, "ResourceManager",
+                        lambda spec=None: _FakeRM(spec))
+
+    SDS7404("192.168.100.202", connect_retries=1, connect_retry_delay_s=0.0)
+
+    assert created["spec"] == "@py"                                  # pyvisa-py backend
+    assert opened["resource"] == "TCPIP0::192.168.100.202::inst0::INSTR"

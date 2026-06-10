@@ -22,8 +22,8 @@ from .data_io import (
     export_spectrum,
     from_arrays,
     load_record,
-    load_two_records,
     save_record,
+    save_records,
 )
 from .mzi_calibrate import MziResult
 from .plot_widget import DisplayOptions, SpectrumPlot, TrendPlot, _format_hz
@@ -40,11 +40,18 @@ from .monitor_io import (
     load_spectrum_result,
     save_cycle_spectrum,
 )
-from .scope import AcquireWorker, TestConnectionWorker, frame_to_arrays
+from .averaging import DEFAULT_FMAX, save_averaged
+from .scope import (
+    AcquireWorker,
+    AverageAcquireWorker,
+    AverageFileWorker,
+    TestConnectionWorker,
+    frame_to_arrays,
+)
 from .settings_panel import (
     MODE_ACQUIRE,
-    MODE_SINGLE_CSV,
-    MODE_TWO_CSV,
+    MODE_AVERAGE,
+    MODE_AVERAGE_FILE,
     SettingsPanel,
 )
 
@@ -76,6 +83,11 @@ class MainWindow(QMainWindow):
         self._cal_worker: CalibrateWorker | None = None
         self._acq_worker: AcquireWorker | None = None
         self._conn_worker: TestConnectionWorker | None = None
+        self._avg_worker = None        # AverageAcquireWorker | AverageFileWorker
+        self._avg_result = None        # latest AveragedResult
+        self._avg_convergence = None   # checkpoint snapshots, if any
+        self._avg_raw_records = None   # kept only when keep-raw averaging ran
+        self._avg_sample_rate = None   # sample rate of those raw records
         self._monitor_worker: MonitorWorker | None = None
         self._monitor_recorder: MonitorRecorder | None = None
         # Last up-to-3 cycles (raw trace + result) kept for rollback save.
@@ -136,9 +148,12 @@ class MainWindow(QMainWindow):
         self.settings.calibrateRequested.connect(
             lambda: self._start_calibrate(user_initiated=True)
         )
+        self.settings.optical.manualToggled.connect(self._on_manual_fsr_toggled)
         self.settings.acquireRequested.connect(self._start_acquire)
         self.settings.testConnectionRequested.connect(self._test_connection)
         self.settings.saveAcquiredRequested.connect(self._save_acquired)
+        self.settings.saveAveragedRequested.connect(self._save_averaged_spectrum)
+        self.settings.saveRawRecordsRequested.connect(self._save_raw_records)
         self.settings.monitorStartRequested.connect(self._start_monitor)
         self.settings.monitorStopRequested.connect(self._stop_monitor)
         self.settings.monitorClearRequested.connect(self._clear_monitor)
@@ -173,26 +188,28 @@ class MainWindow(QMainWindow):
 
     def _on_file_changed(self) -> None:
         mode = self.settings.data.mode
-        if mode == MODE_ACQUIRE:
-            # Scope mode: data is loaded by the Acquire button, not file paths.
-            # Don't reset existing acquired data when user just switches mode.
+        if mode in (MODE_ACQUIRE, MODE_AVERAGE):
+            # Scope sources: data comes from the Acquire button, not file paths.
+            # Don't reset existing data when the user just switches mode.
             return
 
+        if mode == MODE_AVERAGE_FILE:
+            # Averaging-from-file: the worker streams the multi-record file on
+            # Process, so we don't pre-load it into self._data — just reflect the
+            # selection and keep the Process button gating in sync.
+            avg_file = self.settings.data.avg_file
+            self.settings.data.set_info(
+                f"Multi-record file: {avg_file.name}. Click Process to average."
+                if avg_file else "Select a multi-record file (N×BPD1 .npz).")
+            return
+
+        # (XCORR, FILE): a single 3-column file t, BPD1, BPD2.
         f1 = self.settings.data.file1
-        f2 = self.settings.data.file2
         if not f1:
             self._reset_loaded_data()
             return
         try:
-            if mode == MODE_SINGLE_CSV:
-                self._data = load_record(f1)
-            else:  # MODE_TWO_CSV
-                if not f2:
-                    self.settings.data.set_info(
-                        f"Loaded BPD1 ({f1.name}). Select BPD2 to enable processing."
-                    )
-                    return
-                self._data = load_two_records(f1, f2)
+            self._data = load_record(f1)
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, "Load error", str(exc))
             return
@@ -209,11 +226,39 @@ class MainWindow(QMainWindow):
         self.settings.set_calibrated(False)
 
     def _kick_off_autocal(self) -> None:
-        """Fresh data → invalidate any previous FSR and start auto-cal.
-        Process stays locked until calibration succeeds."""
-        self.settings.optical.reset_calibration()
+        """Fresh data → resolve the FSR. A manual fiber-length / τ override
+        takes priority; otherwise auto-calibrate from the data."""
+        opt = self.settings.optical
+        if opt.manual_enabled:
+            opt.apply_manual_fsr()
+            self.settings.set_calibrated(True)
+            self.statusBar().showMessage(
+                f"Using manual FSR = {opt.manual_fsr_hz / 1e6:.4f} MHz "
+                f"(τ = {opt.manual_tau.value():.1f} ns).")
+            self._start_process()
+            return
+        opt.reset_calibration()
         self.settings.set_calibrated(False)
         self._start_calibrate(user_initiated=False)
+
+    def _on_manual_fsr_toggled(self, checked: bool) -> None:
+        """User flipped the 'Manual FSR' override. Re-resolve the FSR: manual
+        value when ticked, else re-run auto-calibration on the current data."""
+        opt = self.settings.optical
+        if checked:
+            opt.apply_manual_fsr()
+            self.settings.set_calibrated(True)
+            # Don't auto-process — the user typically adjusts the length / τ and
+            # then clicks Process. The button stays enabled meanwhile.
+            self.statusBar().showMessage(
+                f"Manual FSR = {opt.manual_fsr_hz / 1e6:.4f} MHz "
+                f"(τ = {opt.manual_tau.value():.1f} ns). Click Process to apply.")
+        else:
+            self.settings.set_calibrated(False)
+            if self._data is not None:
+                self._start_calibrate(user_initiated=False)
+            else:
+                opt.reset_calibration()
 
     @staticmethod
     def _launch_worker(worker, ok_slot, err_slot, *, done_slot=None) -> None:
@@ -273,6 +318,10 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Scope connection failed.")
 
     def _start_acquire(self) -> None:
+        # In average mode the Acquire button runs the multi-acquire averaging.
+        if self.settings.data.mode == MODE_AVERAGE:
+            self._start_average()
+            return
         host = self.settings.data.scope_host
         ch1 = self.settings.data.scope_ch1_name
         ch2 = self.settings.data.scope_ch2_name
@@ -294,6 +343,142 @@ class MainWindow(QMainWindow):
             self._acq_worker, self._on_acquire_ok, self._on_acquire_err,
             done_slot=lambda: self.settings.set_acquiring(False),
         )
+
+    # ---------- multi-acquire averaging ----------
+
+    def _start_average(self) -> None:
+        host = self.settings.data.scope_host
+        ch1 = self.settings.data.scope_ch1_name
+        if not host:
+            QMessageBox.warning(self, "No host",
+                                "Enter the oscilloscope IP first.")
+            return
+        opt = self.settings.optical
+        # A manual FSR override takes priority. Otherwise the worker acquires its
+        # first frame and auto-calibrates the FSR from it (no pre-loaded file
+        # needed) — `fsr=None` signals that path. Auto-cal failure surfaces as a
+        # worker error asking the user to set Manual FSR.
+        fsr = opt.manual_fsr_hz if opt.manual_enabled else None
+        n = self.settings.data.avg_count_n
+        skip = self.settings.data.avg_skip_n
+        conv = self.settings.data.avg_convergence_on
+        n_core = opt.n_core.value()
+        keep_raw = self.settings.data.keep_raw_on
+
+        self._avg_raw_records = None
+        self.settings.data.mark_raw_available(False)
+        self.settings.set_averaging(True)
+        self.statusBar().showMessage(
+            f"Averaging {n} acquisitions from {host} …" if fsr is not None else
+            f"Acquiring first frame from {host} to auto-calibrate FSR …")
+        self._avg_worker = AverageAcquireWorker(
+            host, ch1, n, fsr, skip, DEFAULT_FMAX,
+            with_convergence=conv, n_core=n_core, keep_raw=keep_raw)
+        self._avg_worker.progress.connect(self.statusBar().showMessage)
+        self._launch_worker(
+            self._avg_worker, self._on_average_ok, self._on_average_err,
+            done_slot=lambda: self.settings.set_averaging(False),
+        )
+
+    def _start_average_from_file(self) -> None:
+        """Average a multi-record file (one .npz of N single-BPD raw records)."""
+        avg_file = self.settings.data.avg_file
+        if avg_file is None:
+            QMessageBox.warning(self, "No file",
+                                "Select a multi-record file first.")
+            return
+        opt = self.settings.optical
+        fsr = opt.manual_fsr_hz if opt.manual_enabled else None
+        skip = self.settings.data.avg_skip_n
+        conv = self.settings.data.avg_convergence_on
+        n_core = opt.n_core.value()
+
+        self._avg_raw_records = None
+        self.settings.data.mark_raw_available(False)
+        self.settings.set_processing(True)
+        self.statusBar().showMessage(f"Averaging records from {avg_file.name} …")
+        self._avg_worker = AverageFileWorker(
+            str(avg_file), fsr, skip, DEFAULT_FMAX,
+            with_convergence=conv, n_core=n_core)
+        self._avg_worker.progress.connect(self.statusBar().showMessage)
+        self._launch_worker(
+            self._avg_worker, self._on_average_ok, self._on_average_err,
+            done_slot=lambda: self.settings.set_processing(False),
+        )
+
+    def _on_average_ok(self, payload) -> None:
+        final, snapshots = payload
+        self._avg_result = final
+        self._avg_convergence = snapshots
+        self.settings.data.mark_averaged(True)
+        # Capture raw records if the worker kept them (opt-in keep-raw on the
+        # scope path; the file path never retains them — it loaded from disk).
+        worker = self._avg_worker
+        raw = getattr(worker, "raw_records", None)
+        if raw:
+            self._avg_raw_records = raw
+            self._avg_sample_rate = getattr(worker, "sample_rate_hz", None)
+            self.settings.data.mark_raw_available(True)
+        else:
+            self._avg_raw_records = None
+            self.settings.data.mark_raw_available(False)
+        # Reflect the FSR actually used. When it was auto-calibrated (not a
+        # manual override), surface it in the optical panel so the fiber length
+        # is visible — and so the 20 m-vs-400 m discrepancy is easy to spot.
+        opt = self.settings.optical
+        if not opt.manual_enabled and final.fsr_hz:
+            opt.apply_calibrated_fsr(final.fsr_hz)
+            self.settings.set_calibrated(True)
+        self.plot.render_averaged(final, snapshots or None)
+        lw = (_format_hz(final.linewidth_hz)
+              if final.linewidth_hz == final.linewidth_hz else "—")  # NaN check
+        self.statusBar().showMessage(
+            f"Averaged {final.n_avg} acquisitions "
+            f"(FSR {final.fsr_hz / 1e6:.4f} MHz) — linewidth ≈ {lw}.")
+
+    def _on_average_err(self, message: str) -> None:
+        self.statusBar().showMessage("Averaging failed.")
+        QMessageBox.critical(self, "Averaging failed", message)
+
+    def _save_averaged_spectrum(self) -> None:
+        if self._avg_result is None:
+            return
+        stem = f"averaged_N{self._avg_result.n_avg}"
+        path, selected = QFileDialog.getSaveFileName(
+            self, "Save averaged spectrum", stem,
+            "CSV (*.csv);;NumPy archive (*.npz)")
+        if not path:
+            return
+        out = Path(path)
+        if out.suffix.lower() not in (".csv", ".npz"):
+            out = out.with_suffix(".npz" if "npz" in selected.lower() else ".csv")
+        try:
+            save_averaged(out, self._avg_result)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "Save failed", str(exc))
+            return
+        self.statusBar().showMessage(f"Saved averaged spectrum → {out}")
+
+    def _save_raw_records(self) -> None:
+        """Save the N raw single-BPD records of the last keep-raw average as one
+        multi-record .npz (re-loadable via the averaging file source)."""
+        if not self._avg_raw_records:
+            return
+        n = len(self._avg_raw_records)
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save raw records", f"raw_records_N{n}",
+            "Multi-record NumPy (*.npz)")
+        if not path:
+            return
+        out = Path(path)
+        if out.suffix.lower() != ".npz":
+            out = out.with_suffix(".npz")
+        try:
+            save_records(out, self._avg_raw_records, self._avg_sample_rate)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "Save failed", str(exc))
+            return
+        self.statusBar().showMessage(f"Saved {n} raw records → {out}")
 
     def _on_acquire_ok(self, payload) -> None:
         frame, ch1, ch2 = payload
@@ -330,6 +515,15 @@ class MainWindow(QMainWindow):
     # ---------- processing ----------
 
     def _start_process(self) -> None:
+        # "Process" runs the active algorithm. The averaging algorithm has its
+        # own workers; only the XCORR path runs CoshXcorr on self._data below.
+        mode = self.settings.data.mode
+        if mode == MODE_AVERAGE_FILE:
+            self._start_average_from_file()
+            return
+        if mode == MODE_AVERAGE:
+            self._start_average()
+            return
         if self._data is None:
             QMessageBox.warning(self, "No data",
                                 "Load a CSV file or acquire from scope first.")
@@ -714,17 +908,24 @@ class MainWindow(QMainWindow):
         )
 
     def _on_calibrate_ok(self, res: MziResult) -> None:
+        opt = self.settings.optical
         if res.fsr_hz is None:
-            fsr_fb = self.settings.optical.tau_fallback_hz
-            tau_ns = 1e9 / fsr_fb
-            self.settings.optical.apply_calibrated_fsr(fsr_fb)
+            # Auto-calibration found no FSR dip. Don't lock Process: fall back
+            # to the τ field value so the user can still run, but prompt them to
+            # tick 'Manual FSR' and set the fiber length / τ for accuracy.
+            opt.apply_calibrated_fsr(opt.manual_fsr_hz)
             self.settings.set_calibrated(True)
-            # Surface why detection failed — a bogus carrier (e.g. from a torn
-            # or triggerless frame) collapses the search band and hides the dip.
+            QMessageBox.information(
+                self, "Auto-calibration failed",
+                f"Couldn't detect the MZI FSR from the data "
+                f"(carrier {res.carrier_hz / 1e6:.2f} MHz, searched "
+                f"{res.search_lo / 1e6:.2f}–{res.search_hi / 1e6:.2f} MHz).\n\n"
+                "Tick 'Manual FSR' and enter the fiber length or τ for an "
+                "accurate result. Using the τ field value for now.",
+            )
             self.statusBar().showMessage(
-                f"No FSR dip found (carrier {res.carrier_hz / 1e6:.2f} MHz, "
-                f"searched {res.search_lo / 1e6:.2f}–{res.search_hi / 1e6:.2f} MHz)"
-                f" — using configured τ = {tau_ns:.1f} ns (FSR {fsr_fb / 1e6:.4f} MHz)."
+                f"No FSR dip found — using τ = {opt.manual_tau.value():.1f} ns. "
+                f"Set 'Manual FSR' for accuracy."
             )
             self._start_process()
             return

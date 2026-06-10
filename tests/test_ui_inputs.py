@@ -8,8 +8,9 @@ import numpy as np
 
 from app.data_io import DualBpdData, save_dual_bpd_npz
 from app.settings_panel import (
+    ALGO_XCORR,
     MODE_SINGLE_CSV,
-    MODE_TWO_CSV,
+    SRC_FILE,
     DataSection,
     NoWheelComboBox,
     NoWheelDoubleSpinBox,
@@ -63,10 +64,10 @@ def test_panel_widgets_are_nowheel(qtbot):
     qtbot.addWidget(win)
     assert isinstance(win.settings.optical.n_core, NoWheelDoubleSpinBox)
     assert isinstance(win.settings.segments.ratio, NoWheelSpinBox)
-    assert isinstance(win.settings.data.mode_combo, NoWheelComboBox)
+    assert isinstance(win.settings.data.scope_ch1, NoWheelComboBox)
 
 
-def test_drop_single_file_sets_single_mode_and_emits(qtbot, tmp_path):
+def test_drop_single_file_sets_xcorr_file_mode_and_emits(qtbot, tmp_path):
     sec = DataSection()
     qtbot.addWidget(sec)
     npz = _npz(tmp_path, "rec.npz")
@@ -75,11 +76,14 @@ def test_drop_single_file_sets_single_mode_and_emits(qtbot, tmp_path):
         accepted = sec.accept_dropped([npz])
 
     assert accepted is True
+    assert sec.algorithm == ALGO_XCORR and sec.source == SRC_FILE
     assert sec.mode == MODE_SINGLE_CSV
     assert sec.file1 == npz
 
 
-def test_drop_two_files_sets_two_file_mode(qtbot, tmp_path):
+def test_drop_two_files_takes_first_only(qtbot, tmp_path):
+    # The two-file workflow was removed: dropping several files loads only the
+    # first into the single-file dual-BPD source.
     sec = DataSection()
     qtbot.addWidget(sec)
     p1 = _npz(tmp_path, "a.npz")
@@ -88,8 +92,8 @@ def test_drop_two_files_sets_two_file_mode(qtbot, tmp_path):
     accepted = sec.accept_dropped([p1, p2])
 
     assert accepted is True
-    assert sec.mode == MODE_TWO_CSV
-    assert sec.file1 == p1 and sec.file2 == p2
+    assert sec.mode == MODE_SINGLE_CSV
+    assert sec.file1 == p1
 
 
 def test_drop_unsupported_file_is_rejected(qtbot, tmp_path):

@@ -10,7 +10,9 @@ from app.data_io import (
     load_npy,
     load_npz,
     load_record,
+    load_records,
     load_two_records,
+    save_records,
     save_dual_bpd_npy,
     save_dual_bpd_npz,
     save_record,
@@ -144,3 +146,39 @@ def test_export_spectrum_writes_metadata_and_all_columns(tmp_path):
     np.testing.assert_allclose(
         df["S_nu_cross_Hz2_per_Hz"].to_numpy(), cols["S_nu_cross_Hz2_per_Hz"]
     )
+
+
+# ---------- multi-record averaging files ----------
+
+def test_save_load_records_round_trips(tmp_path):
+    # Arrange: N single-BPD records of equal length
+    records = np.random.default_rng(0).standard_normal((4, 256))
+    out = tmp_path / "multi.npz"
+
+    # Act
+    save_records(out, records, sample_rate=2.5e6)
+    loaded, sr = load_records(out)
+
+    # Assert
+    assert sr == 2.5e6
+    assert loaded.shape == (4, 256)
+    assert loaded.dtype == np.float64
+    np.testing.assert_allclose(loaded, records)
+
+
+def test_save_records_rejects_non_npz(tmp_path):
+    with pytest.raises(ValueError):
+        save_records(tmp_path / "bad.csv", np.zeros((2, 8)), 1e6)
+
+
+def test_save_records_rejects_1d(tmp_path):
+    with pytest.raises(ValueError):
+        save_records(tmp_path / "x.npz", np.zeros(8), 1e6)
+
+
+def test_load_records_rejects_plain_archive(tmp_path):
+    # A normal .npz without the 'records'/'sample_rate' arrays is not accepted.
+    out = tmp_path / "plain.npz"
+    np.savez(out, foo=np.zeros(8))
+    with pytest.raises(ValueError):
+        load_records(out)

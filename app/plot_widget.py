@@ -136,6 +136,42 @@ class SpectrumPlot(QWidget):
         self.figure.tight_layout()
         self.canvas.draw_idle()
 
+    def render_averaged(self, result, convergence=None) -> None:
+        """Render a multi-acquire AveragedResult: the averaged frequency-noise
+        PSD (optionally with per-checkpoint convergence curves) plus the white
+        floor line and linewidth in the title."""
+        self._ax.clear()
+        curves = convergence if convergence else [result]
+        for snap in curves:
+            pos = snap.freq > 0
+            self._ax.loglog(snap.freq[pos], snap.s_nu[pos], linewidth=1.4,
+                            label=f"N={snap.n_avg}")
+
+        if np.isfinite(result.floor_hz2_per_hz):
+            self._ax.axhline(
+                result.floor_hz2_per_hz, color="#FF3B30", linestyle="--",
+                linewidth=1.0,
+                label=(f"floor S₀ = {result.floor_hz2_per_hz:.3g} Hz²/Hz  "
+                       f"→ FWHM = {_format_hz(result.linewidth_hz)}"))
+
+        self._ax.set_xlabel("Frequency (Hz)", color="#1D1D1F")
+        self._ax.set_ylabel(r"$S_\nu$  (Hz$^2$/Hz)", color="#1D1D1F")
+        lw = (_format_hz(result.linewidth_hz)
+              if np.isfinite(result.linewidth_hz) else "—")
+        self._ax.set_title(
+            f"Averaged frequency-noise PSD (N={result.n_avg})  —  "
+            f"linewidth ≈ {lw}", color="#1D1D1F", fontsize=12, pad=10)
+        self._ax.grid(True, which="both", alpha=0.25, linewidth=0.5)
+        self._ax.tick_params(colors="#1D1D1F")
+        for spine in self._ax.spines.values():
+            spine.set_color("#E5E5EA")
+        self._ax.set_facecolor("white")
+        if self._ax.has_data():
+            self._ax.legend(loc="best", frameon=True, framealpha=0.95,
+                            edgecolor="#E5E5EA", fontsize=9)
+        self.figure.tight_layout()
+        self.canvas.draw_idle()
+
     # --- internal ---
     def _draw_placeholder(self) -> None:
         self._ax.clear()

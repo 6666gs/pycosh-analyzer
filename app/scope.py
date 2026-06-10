@@ -146,3 +146,168 @@ def frame_to_arrays(
           if ch2 and ch2 in frame.voltages else None)
     t = np.asarray(frame.time_axis, dtype=np.float64)
     return t, v1, v2, float(frame.sample_rate)
+
+
+def auto_calibrate_fsr(
+    v1: np.ndarray, sample_rate: float, n_core: float
+) -> tuple[float, str]:
+    """Auto-calibrate the MZI FSR from one record. Returns ``(fsr_hz, message)``
+    or raises ``RuntimeError`` (surfaced to the user) when no FSR dip is found.
+    Shared by the scope-streaming and file-based averaging workers."""
+    from .mzi_calibrate import calibrate_mzi
+
+    res = calibrate_mzi(v1, sample_rate, n_core)
+    if res.fsr_hz is None:
+        raise RuntimeError(
+            "Could not auto-detect the MZI FSR from the first record. "
+            "Tick 'Manual FSR' and enter the fiber length / τ, then average "
+            "again.")
+    msg = (f"Auto-calibrated FSR = {res.fsr_hz / 1e6:.4f} MHz "
+           f"(ΔL ≈ {res.delta_L_m:.1f} m). Averaging …")
+    return res.fsr_hz, msg
+
+
+class AverageAcquireWorker(QThread):
+    """Read ch1 ``n_avg`` times and average their frequency-noise spectra
+    (Plot_Linewidth method). Free-runs in AUTO mode (stop → read → run each
+    cycle) so it never blocks on a trigger. Emits the final AveragedResult plus
+    per-checkpoint snapshots when convergence curves are requested.
+
+    The MZI FSR needed for the G(f) compensation can be supplied up front
+    (``fsr_hz``); when it's ``None`` the worker auto-calibrates it from the very
+    first acquired record (no pre-loaded file required) and fails with a clear
+    message if no FSR dip is found, prompting the user to set it manually."""
+
+    progress = Signal(str)
+    finished_ok = Signal(object)     # (final AveragedResult, [checkpoint results])
+    finished_err = Signal(str)
+
+    def __init__(
+        self,
+        host: str,
+        ch1: str,
+        n_avg: int,
+        fsr_hz: float | None,
+        n_skip: int,
+        fmax: float,
+        with_convergence: bool = False,
+        n_core: float = 1.468,
+        keep_raw: bool = False,
+        timeout_ms: int = 30_000,
+        scope_factory=None,
+        parent: QObject | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.host = host
+        self.ch1 = ch1
+        self.n_avg = int(n_avg)
+        self.fsr_hz = fsr_hz
+        self.n_skip = int(n_skip)
+        self.fmax = fmax
+        self.with_convergence = with_convergence
+        self.n_core = n_core
+        self.keep_raw = keep_raw
+        self.timeout_ms = timeout_ms
+        self._scope_factory = scope_factory
+        # Populated only when keep_raw is set (opt-in, since N raw records can be
+        # gigabytes): the acquired single-BPD traces + their sample rate, so the
+        # caller can save them as one multi-record file afterwards.
+        self.raw_records: list[np.ndarray] | None = [] if keep_raw else None
+        self.sample_rate_hz: float | None = None
+
+    def _open_scope(self):
+        if self._scope_factory is not None:
+            return self._scope_factory(self.host, timeout_ms=self.timeout_ms)
+        ensure_sds7404_importable()
+        from sds7404 import SDS7404  # type: ignore
+        return SDS7404(self.host, timeout_ms=self.timeout_ms)
+
+    def run(self) -> None:
+        from .averaging import PsdAverager, even_checkpoints
+        try:
+            averager = PsdAverager(self.n_skip)
+            checkpoints = (set(even_checkpoints(self.n_avg))
+                           if self.with_convergence else set())
+            snapshots = []
+            sample_rate = None
+            fsr = self.fsr_hz                     # None → auto-calibrate below
+            with self._open_scope() as scope:
+                scope.run()                      # AUTO free-run
+                for i in range(self.n_avg):
+                    scope.stop()                 # coherent frame, no trigger wait
+                    frame = scope.read_channels([self.ch1])
+                    scope.run()
+                    _t, v1, _v2, sample_rate = frame_to_arrays(frame, self.ch1, None)
+                    if fsr is None:
+                        fsr, msg = auto_calibrate_fsr(v1, sample_rate, self.n_core)
+                        self.fsr_hz = fsr            # expose the resolved value
+                        self.progress.emit(msg)
+                    if self.raw_records is not None:
+                        self.raw_records.append(np.array(v1, dtype=np.float64))
+                    averager.add(v1)
+                    self.progress.emit(f"Averaging {i + 1}/{self.n_avg} …")
+                    if (i + 1) in checkpoints:
+                        snapshots.append(
+                            averager.result(sample_rate, fsr, self.fmax))
+            self.sample_rate_hz = sample_rate
+            final = averager.result(sample_rate, fsr, self.fmax)
+            self.finished_ok.emit((final, snapshots))
+        except Exception as exc:  # noqa: BLE001
+            self.finished_err.emit(f"{type(exc).__name__}: {exc}")
+
+
+class AverageFileWorker(QThread):
+    """Average a multi-record file (one ``.npz`` holding N single-BPD raw
+    records) off the main thread. Re-uses the exact ``PsdAverager`` pipeline as
+    the scope path — only the record source differs (file rows vs scope reads).
+
+    The MZI FSR is supplied up front (manual override) or, when ``fsr_hz`` is
+    ``None``, auto-calibrated from the first record in the file."""
+
+    progress = Signal(str)
+    finished_ok = Signal(object)     # (final AveragedResult, [checkpoint results])
+    finished_err = Signal(str)
+
+    def __init__(
+        self,
+        path: str | Path,
+        fsr_hz: float | None,
+        n_skip: int,
+        fmax: float,
+        with_convergence: bool = False,
+        n_core: float = 1.468,
+        parent: QObject | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.path = path
+        self.fsr_hz = fsr_hz
+        self.n_skip = int(n_skip)
+        self.fmax = fmax
+        self.with_convergence = with_convergence
+        self.n_core = n_core
+
+    def run(self) -> None:
+        from .averaging import PsdAverager, even_checkpoints
+        from .data_io import load_records
+        try:
+            records, sample_rate = load_records(self.path)
+            n_avg = int(records.shape[0])
+            averager = PsdAverager(self.n_skip)
+            checkpoints = (set(even_checkpoints(n_avg))
+                           if self.with_convergence else set())
+            snapshots = []
+            fsr = self.fsr_hz                     # None → auto-calibrate below
+            for i in range(n_avg):
+                v1 = records[i]
+                if fsr is None:
+                    fsr, msg = auto_calibrate_fsr(v1, sample_rate, self.n_core)
+                    self.fsr_hz = fsr
+                    self.progress.emit(msg)
+                averager.add(v1)
+                self.progress.emit(f"Averaging {i + 1}/{n_avg} …")
+                if (i + 1) in checkpoints:
+                    snapshots.append(averager.result(sample_rate, fsr, self.fmax))
+            final = averager.result(sample_rate, fsr, self.fmax)
+            self.finished_ok.emit((final, snapshots))
+        except Exception as exc:  # noqa: BLE001
+            self.finished_err.emit(f"{type(exc).__name__}: {exc}")

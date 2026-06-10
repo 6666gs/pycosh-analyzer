@@ -9,6 +9,7 @@ from PySide6.QtCore import Qt, Signal
 
 from .data_io import is_data_path
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
@@ -23,7 +24,6 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QSpinBox,
-    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -63,15 +63,26 @@ class NoWheelComboBox(_NoWheelMixin, QComboBox):
 SCOPE_CHANNELS = ("C1", "C2", "C3", "C4")
 NONE_CH_LABEL = "(none)"
 
-# Data source modes
-MODE_SINGLE_CSV = "single_csv"
-MODE_TWO_CSV = "two_csv"
-MODE_ACQUIRE = "acquire"
-MODE_LABELS = {
-    MODE_SINGLE_CSV: "Single file (3 columns: t, BPD1, BPD2)",
-    MODE_TWO_CSV: "Two files (one per channel)",
-    MODE_ACQUIRE: "Acquire from oscilloscope (SDS7404)",
+# ---- Algorithm (top-level tab) × data source (sub-toggle) ----
+# The data panel is organised along two orthogonal axes: which processing
+# algorithm runs, and where its data comes from.
+ALGO_XCORR = "xcorr"        # BW-segmented dual-BPD cross-correlation (CoshXcorr)
+ALGO_AVERAGE = "avg"        # multi-record single-BPD Hann averaging
+ALGO_LABELS = {
+    ALGO_XCORR: "BW 分段 · 双 BPD",
+    ALGO_AVERAGE: "多次平均 · 单 BPD (Hann)",
 }
+
+SRC_FILE = "file"
+SRC_SCOPE = "scope"
+SRC_LABELS = {SRC_FILE: "文件读取", SRC_SCOPE: "从示波器读取"}
+
+# Legacy compatibility modes derived from (algorithm, source). Consumed by
+# MainWindow routing and Monitor gating so most of that code is untouched.
+MODE_SINGLE_CSV = "single_csv"      # (XCORR, FILE)  — single 3-col file
+MODE_ACQUIRE = "acquire"            # (XCORR, SCOPE) — dual-channel grab
+MODE_AVERAGE = "average"            # (AVG,   SCOPE) — acquire ×N & average
+MODE_AVERAGE_FILE = "average_file"  # (AVG,   FILE)  — average a multi-record file
 
 
 # ---------- helpers ----------
@@ -136,9 +147,11 @@ def _grow_form(form: QFormLayout) -> QFormLayout:
 class SettingsSnapshot:
     """Immutable snapshot of all settings at "Process" click time."""
     # Data
+    algorithm: str
+    source: str
     mode: str
     file1: Path | None
-    file2: Path | None
+    avg_file: Path | None
     scope_host: str
     scope_ch1: str
     scope_ch2: str | None
@@ -179,79 +192,155 @@ CONN_STATES = {
 }
 
 
+_SEGMENT_QSS = (
+    'QPushButton[variant="segment"] {'
+    '  background:#F2F2F7; color:#1C1C1E; border:1px solid #D1D1D6;'
+    '  padding:7px 8px; border-radius:7px;'
+    '}'
+    'QPushButton[variant="segment"]:checked {'
+    '  background:#007AFF; color:white; border-color:#007AFF; font-weight:600;'
+    '}'
+    'QPushButton[variant="segment"]:hover:!checked { background:#E5E5EA; }'
+)
+
+
+def _segment_button(text: str) -> QPushButton:
+    btn = QPushButton(text)
+    btn.setCheckable(True)
+    btn.setProperty("variant", "segment")
+    btn.setFocusPolicy(Qt.NoFocus)
+    return btn
+
+
 class DataSection(QFrame):
+    """Data source panel organised along two axes: the processing *algorithm*
+    (top tab) and its *data source* (file vs scope). The content groups below
+    are shown/hidden for the active (algorithm, source) pair."""
     fileChanged = Signal()
+    algorithmChanged = Signal(str)
     acquireRequested = Signal()
     saveAcquiredRequested = Signal()
+    saveAveragedRequested = Signal()
+    saveRawRecordsRequested = Signal()
     testConnectionRequested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("sectionCard")
         self._file1: Path | None = None
-        self._file2: Path | None = None
+        self._avg_file: Path | None = None
         self._has_acquired: bool = False
+        self._raw_available: bool = False
 
-        # Mode selector
-        self.mode_combo = NoWheelComboBox()
-        for key in (MODE_SINGLE_CSV, MODE_TWO_CSV, MODE_ACQUIRE):
-            self.mode_combo.addItem(MODE_LABELS[key], userData=key)
-        self.mode_combo.currentIndexChanged.connect(self._update_mode)
-        _shrinkable(self.mode_combo)
+        # ---- algorithm tab + source toggle (the two-axis selector) ----
+        self.algo_xcorr_btn = _segment_button(ALGO_LABELS[ALGO_XCORR])
+        self.algo_avg_btn = _segment_button(ALGO_LABELS[ALGO_AVERAGE])
+        self.algo_xcorr_btn.setChecked(True)
+        self._algo_group = QButtonGroup(self)
+        self._algo_group.setExclusive(True)
+        self._algo_group.addButton(self.algo_xcorr_btn)
+        self._algo_group.addButton(self.algo_avg_btn)
+        self._algo_group.buttonClicked.connect(self._on_algorithm_clicked)
 
-        # --- File-mode widgets ---
+        self.src_file_btn = _segment_button(SRC_LABELS[SRC_FILE])
+        self.src_scope_btn = _segment_button(SRC_LABELS[SRC_SCOPE])
+        self.src_file_btn.setChecked(True)
+        self._src_group = QButtonGroup(self)
+        self._src_group.setExclusive(True)
+        self._src_group.addButton(self.src_file_btn)
+        self._src_group.addButton(self.src_scope_btn)
+        self._src_group.buttonClicked.connect(self._on_source_clicked)
+
+        # ---- (XCORR, FILE): one 3-column file t, BPD1, BPD2 ----
         self.file1_edit = QLineEdit()
-        self.file1_edit.setPlaceholderText("BPD1 / dual data file (csv/npy/npz)…")
+        self.file1_edit.setPlaceholderText("Single file: t, BPD1, BPD2 (csv/npy/npz)…")
         self.file1_edit.setReadOnly(True)
         _shrinkable(self.file1_edit)
         self.file1_btn = _secondary_btn("Browse")
-        self.file1_btn.clicked.connect(lambda: self._pick(1))
+        self.file1_btn.clicked.connect(self._pick_file1)
+        self._grp_xcorr_file = self._browse_row(self.file1_edit, self.file1_btn)
 
-        self.file2_edit = QLineEdit()
-        self.file2_edit.setPlaceholderText("BPD2 path (only in two-file mode)…")
-        self.file2_edit.setReadOnly(True)
-        _shrinkable(self.file2_edit)
-        self.file2_btn = _secondary_btn("Browse")
-        self.file2_btn.clicked.connect(lambda: self._pick(2))
+        # ---- (AVG, FILE): one multi-record file (N×BPD1) ----
+        self.avg_file_edit = QLineEdit()
+        self.avg_file_edit.setPlaceholderText("Multi-record file: N×BPD1 (.npz)…")
+        self.avg_file_edit.setReadOnly(True)
+        _shrinkable(self.avg_file_edit)
+        self.avg_file_btn = _secondary_btn("Browse")
+        self.avg_file_btn.clicked.connect(self._pick_avg_file)
+        self._grp_avg_file = self._browse_row(self.avg_file_edit, self.avg_file_btn)
 
-        file_widget = QWidget()
-        file_layout = QVBoxLayout(file_widget)
-        file_layout.setContentsMargins(0, 0, 0, 0)
-        file_layout.setSpacing(6)
-        for edit, btn in ((self.file1_edit, self.file1_btn),
-                          (self.file2_edit, self.file2_btn)):
-            row = QHBoxLayout()
-            row.setSpacing(6)
-            row.addWidget(edit, 1)
-            row.addWidget(btn)
-            file_layout.addLayout(row)
-
-        # --- Scope-mode widgets ---
+        # ---- shared scope inputs (IP, BPD1, connection light) ----
         self.scope_ip = QLineEdit("192.168.1.50")
         self.scope_ip.setPlaceholderText("IP or hostname")
         _shrinkable(self.scope_ip)
-
         self.scope_ch1 = NoWheelComboBox()
         for ch in SCOPE_CHANNELS:
             self.scope_ch1.addItem(ch)
         self.scope_ch1.setCurrentText("C2")
-
-        self.scope_ch2 = NoWheelComboBox()
-        for ch in SCOPE_CHANNELS:
-            self.scope_ch2.addItem(ch)
-        self.scope_ch2.addItem(NONE_CH_LABEL)
-        self.scope_ch2.setCurrentText("C4")
-
-        self.scope_single = QCheckBox("Send SINGle trigger first")
-
-        # Connection test: a button + a coloured status light (green/red).
         self.test_conn_btn = _secondary_btn("Test connection")
         self.test_conn_btn.clicked.connect(self.testConnectionRequested.emit)
         self.conn_status = QLabel()
         self.conn_status.setTextFormat(Qt.RichText)
         self._conn_state = "idle"
         self.set_connection_status("idle")
+        common_form = _grow_form(QFormLayout())
+        common_form.setContentsMargins(0, 0, 0, 0)
+        common_form.setSpacing(6)
+        common_form.addRow("Scope IP", self.scope_ip)
+        common_form.addRow("BPD1 channel", self.scope_ch1)
+        conn_row = QHBoxLayout()
+        conn_row.setSpacing(8)
+        conn_row.setContentsMargins(0, 0, 0, 0)
+        conn_row.addWidget(self.test_conn_btn)
+        conn_row.addWidget(self.conn_status, 1)
+        common_form.addRow("", self._row_widget(conn_row))
+        self._grp_scope_common = self._form_widget(common_form)
 
+        # ---- (XCORR, SCOPE) extra: BPD2 + SINGle trigger ----
+        self.scope_ch2 = NoWheelComboBox()
+        for ch in SCOPE_CHANNELS:
+            self.scope_ch2.addItem(ch)
+        self.scope_ch2.addItem(NONE_CH_LABEL)
+        self.scope_ch2.setCurrentText("C4")
+        self.scope_single = QCheckBox("Send SINGle trigger first")
+        xs_form = _grow_form(QFormLayout())
+        xs_form.setContentsMargins(0, 0, 0, 0)
+        xs_form.setSpacing(6)
+        xs_form.addRow("BPD2 channel", self.scope_ch2)
+        xs_form.addRow("", self.scope_single)
+        self._grp_xcorr_scope = self._form_widget(xs_form)
+
+        # ---- (AVG, SCOPE) extra: Average N + opt-in keep-raw ----
+        self.avg_count = NoWheelSpinBox()
+        self.avg_count.setRange(2, 100_000)
+        self.avg_count.setValue(10)
+        self.avg_count.setToolTip("How many consecutive acquisitions to average.")
+        self.keep_raw_check = QCheckBox("保留原始记录 (便于保存为多记录文件)")
+        self.keep_raw_check.setToolTip(
+            "Keep the N raw traces in memory so they can be saved as one "
+            "multi-record file. N records may total several GB.")
+        avs_form = _grow_form(QFormLayout())
+        avs_form.setContentsMargins(0, 0, 0, 0)
+        avs_form.setSpacing(6)
+        avs_form.addRow("Average N", self.avg_count)
+        avs_form.addRow("", self.keep_raw_check)
+        self._grp_avg_scope = self._form_widget(avs_form)
+
+        # ---- AVG common params (both sources): edge skip + convergence ----
+        self.avg_skip = NoWheelSpinBox()
+        self.avg_skip.setRange(0, 100_000_000)
+        self.avg_skip.setSingleStep(1000)
+        self.avg_skip.setValue(10_000)
+        self.avg_skip.setToolTip("Samples trimmed from each end of every record.")
+        self.avg_convergence = QCheckBox("Show convergence curves")
+        avp_form = _grow_form(QFormLayout())
+        avp_form.setContentsMargins(0, 0, 0, 0)
+        avp_form.setSpacing(6)
+        avp_form.addRow("Edge skip", self.avg_skip)
+        avp_form.addRow("", self.avg_convergence)
+        self._grp_avg_params = self._form_widget(avp_form)
+
+        # ---- action / save buttons ----
         self.acquire_btn = QPushButton("⏺  Acquire from scope")
         self.acquire_btn.setProperty("variant", "secondary")
         self.acquire_btn.clicked.connect(self.acquireRequested.emit)
@@ -260,65 +349,96 @@ class DataSection(QFrame):
         self.save_acquired_btn.setEnabled(False)
         self.save_acquired_btn.clicked.connect(self.saveAcquiredRequested.emit)
 
-        scope_widget = QWidget()
-        scope_form = _grow_form(QFormLayout(scope_widget))
-        scope_form.setContentsMargins(0, 0, 0, 0)
-        scope_form.setSpacing(6)
-        scope_form.addRow("Scope IP", self.scope_ip)
-        scope_form.addRow("BPD1 channel", self.scope_ch1)
-        scope_form.addRow("BPD2 channel", self.scope_ch2)
-        scope_form.addRow("", self.scope_single)
-        conn_row = QHBoxLayout()
-        conn_row.setSpacing(8)
-        conn_row.setContentsMargins(0, 0, 0, 0)
-        conn_row.addWidget(self.test_conn_btn)
-        conn_row.addWidget(self.conn_status, 1)
-        scope_form.addRow("", self._row_widget(conn_row))
-        # Stack the two action buttons vertically: side-by-side they would
-        # force a minimum row width that overflows the sidebar (the
-        # QStackedWidget reserves the wider page's sizeHint for both modes).
-        scope_btn_col = QVBoxLayout()
-        scope_btn_col.setSpacing(6)
-        scope_btn_col.setContentsMargins(0, 0, 0, 0)
-        scope_btn_col.addWidget(self.acquire_btn)
-        scope_btn_col.addWidget(self.save_acquired_btn)
-        scope_form.addRow("", self._row_widget(scope_btn_col))
-
-        # Single stack: page 0 = file pickers (shared by single_csv + two_csv,
-        # the file2 row is just disabled in single_csv mode), page 1 = scope.
-        self.mode_stack = QStackedWidget()
-        self.mode_stack.addWidget(file_widget)     # page 0
-        self.mode_stack.addWidget(scope_widget)    # page 1
+        self.save_averaged_btn = _secondary_btn("Save averaged spectrum (CSV/npz)…")
+        self.save_averaged_btn.setEnabled(False)
+        self.save_averaged_btn.clicked.connect(self.saveAveragedRequested.emit)
+        self.save_raw_btn = _secondary_btn("Save raw records (N→1 .npz)…")
+        self.save_raw_btn.setEnabled(False)
+        self.save_raw_btn.clicked.connect(self.saveRawRecordsRequested.emit)
+        avsave_col = QVBoxLayout()
+        avsave_col.setContentsMargins(0, 0, 0, 0)
+        avsave_col.setSpacing(6)
+        avsave_col.addWidget(self.save_averaged_btn)
+        avsave_col.addWidget(self.save_raw_btn)
+        self._grp_avg_save = self._row_widget(avsave_col)
 
         self.info_label = _hint("No data loaded.")
 
+        # ---- assemble: selectors on top, content groups, then info ----
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(8)
-        layout.addWidget(self.mode_combo)
-        layout.addWidget(self.mode_stack)
+        layout.addWidget(self._segmented_row(self.algo_xcorr_btn, self.algo_avg_btn))
+        layout.addWidget(self._segmented_row(self.src_file_btn, self.src_scope_btn))
+        for grp in (self._grp_xcorr_file, self._grp_avg_file,
+                    self._grp_scope_common, self._grp_xcorr_scope,
+                    self._grp_avg_scope, self._grp_avg_params,
+                    self.acquire_btn, self.save_acquired_btn, self._grp_avg_save):
+            layout.addWidget(grp)
         layout.addWidget(self.info_label)
 
-        self._update_mode()
+        self._update_mode_widgets()
 
+    # ---- small layout helpers ----
     @staticmethod
-    def _row_widget(layout: QHBoxLayout) -> QWidget:
+    def _row_widget(layout) -> QWidget:
         w = QWidget()
         w.setLayout(layout)
         return w
 
-    # ---- public ----
+    @staticmethod
+    def _form_widget(form: QFormLayout) -> QWidget:
+        w = QWidget()
+        w.setLayout(form)
+        return w
+
+    @staticmethod
+    def _browse_row(edit: QLineEdit, btn: QPushButton) -> QWidget:
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(6)
+        row.addWidget(edit, 1)
+        row.addWidget(btn)
+        return DataSection._row_widget(row)
+
+    @staticmethod
+    def _segmented_row(b1: QPushButton, b2: QPushButton) -> QWidget:
+        box = QWidget()
+        lay = QHBoxLayout(box)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(6)
+        lay.addWidget(b1, 1)
+        lay.addWidget(b2, 1)
+        box.setStyleSheet(_SEGMENT_QSS)
+        return box
+
+    # ---- public state ----
+    @property
+    def algorithm(self) -> str:
+        return ALGO_AVERAGE if self.algo_avg_btn.isChecked() else ALGO_XCORR
+
+    @property
+    def source(self) -> str:
+        return SRC_SCOPE if self.src_scope_btn.isChecked() else SRC_FILE
+
     @property
     def mode(self) -> str:
-        return self.mode_combo.currentData() or MODE_SINGLE_CSV
+        """Legacy (algorithm, source) → flat mode string for MainWindow routing."""
+        if self.algorithm == ALGO_AVERAGE:
+            return MODE_AVERAGE if self.source == SRC_SCOPE else MODE_AVERAGE_FILE
+        return MODE_ACQUIRE if self.source == SRC_SCOPE else MODE_SINGLE_CSV
 
     @property
     def file1(self) -> Path | None:
         return self._file1
 
     @property
-    def file2(self) -> Path | None:
-        return self._file2
+    def avg_file(self) -> Path | None:
+        return self._avg_file
+
+    @property
+    def keep_raw_on(self) -> bool:
+        return self.keep_raw_check.isChecked()
 
     @property
     def scope_host(self) -> str:
@@ -357,24 +477,72 @@ class DataSection(QFrame):
         self._has_acquired = acquired
         self.save_acquired_btn.setEnabled(acquired)
 
-    def _update_mode(self) -> None:
+    def set_selectors_enabled(self, enabled: bool) -> None:
+        """Lock/unlock the algorithm + source toggles (e.g. while monitoring)."""
+        for btn in (self.algo_xcorr_btn, self.algo_avg_btn,
+                    self.src_file_btn, self.src_scope_btn):
+            btn.setEnabled(enabled)
+
+    # ---- multi-acquire average ----
+    @property
+    def avg_count_n(self) -> int:
+        return self.avg_count.value()
+
+    @property
+    def avg_skip_n(self) -> int:
+        return self.avg_skip.value()
+
+    @property
+    def avg_convergence_on(self) -> bool:
+        return self.avg_convergence.isChecked()
+
+    def mark_averaged(self, available: bool) -> None:
+        self.save_averaged_btn.setEnabled(available)
+
+    def mark_raw_available(self, available: bool) -> None:
+        """Enable 'Save raw records' once a keep-raw average has produced them."""
+        self._raw_available = available
+        self.save_raw_btn.setEnabled(available)
+
+    # ---- selection / visibility ----
+    def _on_algorithm_clicked(self, _btn=None) -> None:
+        self._update_mode_widgets()
+        self.algorithmChanged.emit(self.algorithm)
+        self.fileChanged.emit()
+
+    def _on_source_clicked(self, _btn=None) -> None:
         self._update_mode_widgets()
         self.fileChanged.emit()
 
-    def _update_mode_widgets(self) -> None:
-        mode = self.mode
-        if mode == MODE_ACQUIRE:
-            self.mode_stack.setCurrentIndex(1)
-        else:
-            self.mode_stack.setCurrentIndex(0)
-            two_file = (mode == MODE_TWO_CSV)
-            self.file2_edit.setEnabled(two_file)
-            self.file2_btn.setEnabled(two_file)
-            if not two_file:
-                self._file2 = None
-                self.file2_edit.clear()
+    def select_algorithm(self, algorithm: str) -> None:
+        """Programmatically switch algorithm tab (emits the change signals)."""
+        (self.algo_avg_btn if algorithm == ALGO_AVERAGE
+         else self.algo_xcorr_btn).setChecked(True)
+        self._on_algorithm_clicked()
 
-    def _pick(self, idx: int) -> None:
+    def select_source(self, source: str) -> None:
+        """Programmatically switch data source (emits fileChanged)."""
+        (self.src_scope_btn if source == SRC_SCOPE
+         else self.src_file_btn).setChecked(True)
+        self._on_source_clicked()
+
+    def _update_mode_widgets(self) -> None:
+        is_avg = self.algorithm == ALGO_AVERAGE
+        is_scope = self.source == SRC_SCOPE
+        self._grp_xcorr_file.setVisible(not is_avg and not is_scope)
+        self._grp_avg_file.setVisible(is_avg and not is_scope)
+        self._grp_scope_common.setVisible(is_scope)
+        self._grp_xcorr_scope.setVisible(not is_avg and is_scope)
+        self._grp_avg_scope.setVisible(is_avg and is_scope)
+        self._grp_avg_params.setVisible(is_avg)
+        self.acquire_btn.setVisible(is_scope)
+        self.save_acquired_btn.setVisible(not is_avg and is_scope)
+        self._grp_avg_save.setVisible(is_avg)
+        self.save_raw_btn.setVisible(is_avg and is_scope)
+        self.acquire_btn.setText(
+            "⏺  Acquire ×N & average" if is_avg else "⏺  Acquire from scope")
+
+    def _pick_file1(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self, "Select data file", "",
             "Data files (*.csv *.npy *.npz);;CSV (*.csv);;"
@@ -382,42 +550,42 @@ class DataSection(QFrame):
         )
         if not path:
             return
-        self._set_file(idx, Path(path))
+        self._set_file1(Path(path))
         self.fileChanged.emit()
 
-    def _set_file(self, idx: int, path: Path) -> None:
-        if idx == 1:
-            self._file1 = path
-            self.file1_edit.setText(str(path))
-        else:
-            self._file2 = path
-            self.file2_edit.setText(str(path))
+    def _pick_avg_file(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select multi-record file", "",
+            "Multi-record NumPy (*.npz);;All files (*)",
+        )
+        if not path:
+            return
+        self._set_avg_file(Path(path))
+        self.fileChanged.emit()
+
+    def _set_file1(self, path: Path) -> None:
+        self._file1 = path
+        self.file1_edit.setText(str(path))
+
+    def _set_avg_file(self, path: Path) -> None:
+        self._avg_file = path
+        self.avg_file_edit.setText(str(path))
 
     def accept_dropped(self, paths: list[Path]) -> bool:
-        """Load file(s) dropped onto the window. One file → single-file mode;
-        two → two-file mode. Returns True if anything was accepted."""
+        """Load a data file dropped onto the window → dual-BPD single-file mode
+        (first file only; the two-file workflow was removed). Returns True if
+        anything was accepted."""
         paths = [p for p in paths if is_data_path(p)]
         if not paths:
             return False
-        if len(paths) >= 2:
-            self._set_mode(MODE_TWO_CSV)
-            self._set_file(1, paths[0])
-            self._set_file(2, paths[1])
-        else:
-            self._set_mode(MODE_SINGLE_CSV)
-            self._set_file(1, paths[0])
+        # Switch to (XCORR, FILE) without re-emitting — we emit once below.
+        self.algo_xcorr_btn.setChecked(True)
+        self.src_file_btn.setChecked(True)
+        self._update_mode_widgets()
+        self._set_file1(paths[0])
+        self.algorithmChanged.emit(self.algorithm)
         self.fileChanged.emit()
         return True
-
-    def _set_mode(self, key: str) -> None:
-        """Select a data-source mode by key without re-emitting fileChanged
-        (the caller emits once after the file paths are set)."""
-        index = self.mode_combo.findData(key)
-        if index >= 0 and index != self.mode_combo.currentIndex():
-            blocked = self.mode_combo.blockSignals(True)
-            self.mode_combo.setCurrentIndex(index)
-            self.mode_combo.blockSignals(blocked)
-            self._update_mode_widgets()
 
 
 # ---------- Optical section ----------
@@ -448,20 +616,22 @@ class OpticalSection(QFrame):
     single place (`_apply_state`)."""
     calibrateRequested = Signal()
     fsrChanged = Signal()
+    manualToggled = Signal(bool)   # "Manual FSR" checkbox flipped
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("sectionCard")
 
-        self._fsr_hz: float | None = None
+        self._fsr_hz: float | None = None   # auto-calibration result
         self._state: _FsrState = _FsrState.IDLE
+        self._syncing: bool = False         # guards the length <-> τ link
 
         self.n_core = NoWheelDoubleSpinBox()
         self.n_core.setRange(1.0, 2.0)
         self.n_core.setDecimals(4)
         self.n_core.setSingleStep(0.001)
         self.n_core.setValue(1.468)
-        self.n_core.valueChanged.connect(self._refresh_display)
+        self.n_core.valueChanged.connect(self._on_n_core_changed)
         _shrinkable(self.n_core)
 
         self.aom_freq = NoWheelDoubleSpinBox()
@@ -471,16 +641,33 @@ class OpticalSection(QFrame):
         self.aom_freq.setValue(80.0)
         _shrinkable(self.aom_freq)
 
-        self.tau_fallback = NoWheelDoubleSpinBox()
-        self.tau_fallback.setRange(0.1, 100_000.0)
-        self.tau_fallback.setSuffix(" ns")
-        self.tau_fallback.setDecimals(1)
-        self.tau_fallback.setValue(100.0)
-        self.tau_fallback.setToolTip(
-            "Fallback delay used when FSR auto-calibration fails "
-            "(τ = 1/FSR)."
-        )
-        _shrinkable(self.tau_fallback)
+        # Manual FSR override. When ticked, the FSR comes from the fiber length
+        # / τ below (which take priority over auto-calibration); the two fields
+        # are two views of the same delay (τ = n·ΔL/c, FSR = 1/τ) and stay
+        # linked. When unticked, the FSR is auto-calibrated from the data.
+        self.manual_check = QCheckBox("Manual FSR (set fiber length / τ)")
+        self.manual_check.toggled.connect(self._on_manual_toggled)
+
+        self.manual_len = NoWheelDoubleSpinBox()
+        self.manual_len.setRange(0.001, 100_000.0)
+        self.manual_len.setSuffix(" m")
+        self.manual_len.setDecimals(4)
+        self.manual_len.setToolTip("MZI path-length difference ΔL.")
+        self.manual_len.valueChanged.connect(self._on_len_changed)
+        _shrinkable(self.manual_len)
+
+        self.manual_tau = NoWheelDoubleSpinBox()
+        self.manual_tau.setRange(0.1, 100_000.0)
+        self.manual_tau.setSuffix(" ns")
+        self.manual_tau.setDecimals(1)
+        self.manual_tau.setValue(100.0)
+        self.manual_tau.setToolTip("Delay-line round-trip time τ = 1/FSR.")
+        self.manual_tau.valueChanged.connect(self._on_tau_changed)
+        _shrinkable(self.manual_tau)
+
+        self._sync_len_from_tau()                 # initialise ΔL from the default τ
+        self.manual_len.setEnabled(False)
+        self.manual_tau.setEnabled(False)
 
         self.fsr_display = _metric(_FSR_STATE_TEXTS[_FsrState.IDLE][0])
         self.fsr_display.setWordWrap(True)
@@ -502,39 +689,51 @@ class OpticalSection(QFrame):
         editable_row.addWidget(QLabel("AOM"))
         editable_row.addWidget(self.aom_freq, 1)
 
-        tau_row = QHBoxLayout()
-        tau_row.setSpacing(6)
-        tau_row.addWidget(QLabel("τ fallback"))
-        tau_row.addWidget(self.tau_fallback, 1)
+        manual_row = QHBoxLayout()
+        manual_row.setSpacing(6)
+        manual_row.addWidget(QLabel("ΔL"))
+        manual_row.addWidget(self.manual_len, 1)
+        manual_row.addSpacing(8)
+        manual_row.addWidget(QLabel("τ"))
+        manual_row.addWidget(self.manual_tau, 1)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 10, 12, 10)
         layout.setSpacing(6)
         layout.addLayout(editable_row)
-        layout.addLayout(tau_row)
+        layout.addWidget(self.manual_check)
+        layout.addLayout(manual_row)
         layout.addWidget(self.fsr_display)
         layout.addWidget(self.delay_len_display)
         layout.addWidget(self.calibrate_btn)
 
     # ---- state ----
     @property
+    def manual_enabled(self) -> bool:
+        return self.manual_check.isChecked()
+
+    @property
+    def manual_fsr_hz(self) -> float:
+        """FSR implied by the manual τ field (= 1/τ; ΔL gives the same value)."""
+        return 1.0 / (self.manual_tau.value() * 1e-9)
+
+    @property
     def is_calibrated(self) -> bool:
-        return self._state == _FsrState.CALIBRATED
+        # Manual override is always a usable FSR; otherwise auto-cal must succeed.
+        return self.manual_enabled or self._state == _FsrState.CALIBRATED
 
     @property
     def delay_freq_hz(self) -> float | None:
+        if self.manual_enabled:
+            return self.manual_fsr_hz
         return self._fsr_hz
 
     @property
     def delay_length_m(self) -> float | None:
-        if self._fsr_hz is None:
+        fsr = self.delay_freq_hz
+        if fsr is None:
             return None
-        return C_LIGHT / (self.n_core.value() * self._fsr_hz)
-
-    @property
-    def tau_fallback_hz(self) -> float:
-        """FSR derived from the manually-configured fallback τ."""
-        return 1.0 / (self.tau_fallback.value() * 1e-9)
+        return C_LIGHT / (self.n_core.value() * fsr)
 
     # ---- transitions driven by MainWindow ----
     def set_calibrating(self) -> None:
@@ -543,6 +742,12 @@ class OpticalSection(QFrame):
     def apply_calibrated_fsr(self, fsr_hz: float) -> None:
         self._fsr_hz = fsr_hz
         self._apply_state(_FsrState.CALIBRATED)
+
+    def apply_manual_fsr(self) -> None:
+        """Refresh the labels to show the manual FSR. ``delay_freq_hz`` already
+        returns it while the override is ticked, so no state change is needed."""
+        self._refresh_display()
+        self.fsrChanged.emit()
 
     def calibration_failed(self) -> None:
         """Called when auto-cal couldn't find a clean FSR zero."""
@@ -554,38 +759,80 @@ class OpticalSection(QFrame):
         self._fsr_hz = None
         self._apply_state(_FsrState.IDLE)
 
+    # ---- length <-> τ linking ----
+    def _sync_len_from_tau(self) -> None:
+        self._syncing = True
+        dl = self.manual_tau.value() * 1e-9 * C_LIGHT / self.n_core.value()
+        self.manual_len.setValue(dl)
+        self._syncing = False
+
+    def _sync_tau_from_len(self) -> None:
+        self._syncing = True
+        tau_ns = self.manual_len.value() * self.n_core.value() / C_LIGHT * 1e9
+        self.manual_tau.setValue(tau_ns)
+        self._syncing = False
+
+    def _on_tau_changed(self) -> None:
+        if self._syncing:
+            return
+        self._sync_len_from_tau()
+        self._refresh_display()
+        if self.manual_enabled:
+            self.fsrChanged.emit()
+
+    def _on_len_changed(self) -> None:
+        if self._syncing:
+            return
+        self._sync_tau_from_len()
+        self._refresh_display()
+        if self.manual_enabled:
+            self.fsrChanged.emit()
+
+    def _on_n_core_changed(self) -> None:
+        # Hold ΔL (physical) and recompute τ for the new index.
+        if not self._syncing:
+            self._sync_tau_from_len()
+        self._refresh_display()
+        if self.manual_enabled:
+            self.fsrChanged.emit()
+
+    def _on_manual_toggled(self, checked: bool) -> None:
+        self.manual_len.setEnabled(checked)
+        self.manual_tau.setEnabled(checked)
+        self._refresh_calibrate_btn()
+        self._refresh_display()
+        self.manualToggled.emit(checked)
+
     # ---- internal ----
+    def _refresh_calibrate_btn(self) -> None:
+        # Re-calibrate is only meaningful in auto mode (manual ignores it).
+        self.calibrate_btn.setEnabled(
+            not self.manual_enabled
+            and self._state in (_FsrState.CALIBRATED, _FsrState.FAILED))
+
     def _apply_state(self, state: _FsrState) -> None:
-        """Single source of truth for label text + button-enabled. Every
-        state transition goes through here so the four states can't
-        desync."""
+        """Single source of truth for label text + button-enabled."""
         self._state = state
-        if state == _FsrState.CALIBRATED:
+        if self.manual_enabled or state == _FsrState.CALIBRATED:
             self._refresh_display()
-            self.calibrate_btn.setEnabled(True)
         else:
             text_fsr, text_len = _FSR_STATE_TEXTS[state]
             self.fsr_display.setText(text_fsr)
             self.delay_len_display.setText(text_len)
-            # Allow retry after a real failure; lock during cal / when idle.
-            self.calibrate_btn.setEnabled(state == _FsrState.FAILED)
+        self._refresh_calibrate_btn()
         self.fsrChanged.emit()
 
     def _refresh_display(self) -> None:
-        """Refresh the FSR / fiber-length text. Called by `_apply_state`
-        on transition to CALIBRATED, and by `n_core.valueChanged` when
-        the user edits the refractive index after calibration."""
-        if self._fsr_hz is None:
+        """Refresh the FSR / fiber-length labels from the resolved FSR
+        (manual override or auto-calibration result)."""
+        fsr = self.delay_freq_hz
+        if fsr is None:
             return
-        fsr_mhz = self._fsr_hz / 1e6
-        tau_ns = 1e9 / self._fsr_hz
-        # Read through the property so the C_LIGHT/(n·fsr) compute lives
-        # in one place.
-        delay_m = self.delay_length_m
+        src = "manual" if self.manual_enabled else "auto"
         self.fsr_display.setText(
-            f"FSR  {fsr_mhz:.4f} MHz   (τ = {tau_ns:.2f} ns)"
+            f"FSR  {fsr / 1e6:.4f} MHz   (τ = {1e9 / fsr:.2f} ns, {src})"
         )
-        self.delay_len_display.setText(f"Fiber  {delay_m:.4f} m")
+        self.delay_len_display.setText(f"Fiber  {self.delay_length_m:.4f} m")
 
 
 # ---------- Segment section ----------
@@ -683,11 +930,15 @@ class DisplaySection(QFrame):
         radio_row.addWidget(self.r_phase)
         radio_row.addStretch(1)
 
+        # BPD1/BPD2 share a row (hidden as a unit for single-BPD averaging).
         chk_row1 = QHBoxLayout()
+        chk_row1.setContentsMargins(0, 0, 0, 0)
         chk_row1.setSpacing(12)
         chk_row1.addWidget(self.c_bpd1)
         chk_row1.addWidget(self.c_bpd2)
         chk_row1.addStretch(1)
+        self._bpd_single_row = QWidget()
+        self._bpd_single_row.setLayout(chk_row1)
 
         chk_row2 = QHBoxLayout()
         chk_row2.setSpacing(12)
@@ -699,8 +950,15 @@ class DisplaySection(QFrame):
         layout.setContentsMargins(12, 10, 12, 10)
         layout.setSpacing(6)
         layout.addLayout(radio_row)
-        layout.addLayout(chk_row1)
+        layout.addWidget(self._bpd_single_row)
         layout.addLayout(chk_row2)
+
+    def set_single_bpd(self, single: bool) -> None:
+        """Single-BPD averaging shows one curve, so hide the per-channel
+        BPD1/BPD2 and cross-correlation toggles (the freq/phase radios and the
+        error-band toggle still apply)."""
+        self._bpd_single_row.setVisible(not single)
+        self.c_cross.setVisible(not single)
 
 
 # ---------- Analysis section (Lorentz floor + β-separation) ----------
@@ -805,6 +1063,8 @@ class SettingsPanel(QWidget):
     calibrateRequested = Signal()
     acquireRequested = Signal()
     saveAcquiredRequested = Signal()
+    saveAveragedRequested = Signal()
+    saveRawRecordsRequested = Signal()
     testConnectionRequested = Signal()
     monitorStartRequested = Signal()
     monitorStopRequested = Signal()
@@ -842,11 +1102,10 @@ class SettingsPanel(QWidget):
             "QPushButton:pressed  { background-color: #0055B3; }"
             "QPushButton:disabled { background-color: #C7C7CC; color: white; }"
         )
-        # The Process button is gated by two independent flags below:
-        # _busy (a process run is already in flight) and _calibrated (we
-        # have a usable FSR). They're composed in `_refresh_process_btn`.
+        # Process gating composes _busy (a run is already in flight), the live
+        # FSR state (optical.is_calibrated), the active algorithm/source, and
+        # _monitoring — all evaluated in `_refresh_process_btn`.
         self._busy: bool = False
-        self._calibrated: bool = False
         self.process_btn.setEnabled(False)
 
         self.export_btn = _secondary_btn("Export spectra…")
@@ -889,15 +1148,24 @@ class SettingsPanel(QWidget):
         self.data.fileChanged.connect(self.fileChanged.emit)
         self.data.acquireRequested.connect(self.acquireRequested.emit)
         self.data.saveAcquiredRequested.connect(self.saveAcquiredRequested.emit)
+        self.data.saveAveragedRequested.connect(self.saveAveragedRequested.emit)
+        self.data.saveRawRecordsRequested.connect(self.saveRawRecordsRequested.emit)
         self.data.testConnectionRequested.connect(self.testConnectionRequested.emit)
         self.display.optionsChanged.connect(self.optionsChanged.emit)
         self.analysis.optionsChanged.connect(self.optionsChanged.emit)
         self.optical.calibrateRequested.connect(self.calibrateRequested.emit)
+        # Any FSR change (manual override / length / τ edits) re-evaluates the
+        # Process + Monitor buttons so they track the live calibration state.
+        self.optical.fsrChanged.connect(self._refresh_process_btn)
+        self.optical.fsrChanged.connect(self._refresh_monitor_btn)
         self.process_btn.clicked.connect(self.processRequested.emit)
         self.export_btn.clicked.connect(self.exportRequested.emit)
         self.monitor_btn.clicked.connect(self._on_monitor_clicked)
-        # Mode changes (emitted via data.fileChanged) re-evaluate monitor gating.
+        # Mode changes (emitted via data.fileChanged) re-evaluate the action
+        # buttons; switching algorithm tab also toggles section visibility.
         self.data.fileChanged.connect(self._refresh_monitor_btn)
+        self.data.fileChanged.connect(self._refresh_process_btn)
+        self.data.algorithmChanged.connect(self._on_algorithm_changed)
 
         # Sections live in a vertical-scroll-only container. We never
         # want the sidebar to scroll horizontally — when the user shrinks
@@ -908,6 +1176,9 @@ class SettingsPanel(QWidget):
         sections_layout = QVBoxLayout(sections_widget)
         sections_layout.setContentsMargins(16, 16, 16, 8)
         sections_layout.setSpacing(8)
+        # Each section is a (title + card) box so it can be hidden as a unit.
+        # The averaging algorithm has no BW segments, so its box is toggled off.
+        self._section_boxes: dict[str, QWidget] = {}
         for title, widget in (
             ("Data", self.data),
             ("Optical path", self.optical),
@@ -915,8 +1186,14 @@ class SettingsPanel(QWidget):
             ("Display", self.display),
             ("Analysis", self.analysis),
         ):
-            sections_layout.addWidget(_section_title(title))
-            sections_layout.addWidget(widget)
+            box = QWidget()
+            box_col = QVBoxLayout(box)
+            box_col.setContentsMargins(0, 0, 0, 0)
+            box_col.setSpacing(8)
+            box_col.addWidget(_section_title(title))
+            box_col.addWidget(widget)
+            self._section_boxes[title] = box
+            sections_layout.addWidget(box)
         sections_layout.addStretch(1)
 
         scroll = QScrollArea()
@@ -939,13 +1216,17 @@ class SettingsPanel(QWidget):
         btn_layout.setContentsMargins(16, 10, 16, 12)
         btn_layout.setSpacing(8)
         btn_layout.addWidget(self.process_btn)
+        # Monitoring (live) is a dual-BPD-only feature; the whole row is hidden
+        # under the averaging algorithm. Wrapped so it toggles as one unit.
         monitor_row = QHBoxLayout()
         monitor_row.setSpacing(8)
         monitor_row.setContentsMargins(0, 0, 0, 0)
         monitor_row.addWidget(self.monitor_btn, 1)
         monitor_row.addWidget(self.save_monitor_check)
         monitor_row.addWidget(self.monitor_clear_btn)
-        btn_layout.addLayout(monitor_row)
+        self._monitor_row_widget = QWidget()
+        self._monitor_row_widget.setLayout(monitor_row)
+        btn_layout.addWidget(self._monitor_row_widget)
         btn_layout.addWidget(self.export_btn)
         btn_layout.addWidget(self.rollback_group)
 
@@ -954,6 +1235,9 @@ class SettingsPanel(QWidget):
         layout.setSpacing(0)
         layout.addWidget(scroll, 1)
         layout.addWidget(button_row)
+
+        # Apply the initial algorithm's section visibility (default = XCORR).
+        self._on_algorithm_changed(self.data.algorithm)
 
     @property
     def save_monitor_enabled(self) -> bool:
@@ -1015,15 +1299,44 @@ class SettingsPanel(QWidget):
         self._refresh_monitor_btn()
 
     def set_calibrated(self, calibrated: bool) -> None:
-        """Called by MainWindow after auto-cal succeeds/fails."""
-        self._calibrated = calibrated
+        """Called by MainWindow after auto-cal succeeds/fails. The button gating
+        reads the live ``optical.is_calibrated`` state, so this just re-evaluates
+        the Process / Monitor buttons (the ``calibrated`` arg is advisory)."""
         self._refresh_process_btn()
         self._refresh_monitor_btn()
 
     def _refresh_process_btn(self) -> None:
+        # Process means "run the active algorithm". Gating differs by algorithm:
+        #  • XCORR: needs a usable FSR (manual or auto-cal).
+        #  • AVG+FILE: needs a multi-record file (the worker auto-cals the FSR).
+        #  • AVG+SCOPE: the in-panel 'Acquire ×N & average' button is the action,
+        #    so Process re-runs it too — enabled whenever not busy.
+        if self.data.algorithm == ALGO_AVERAGE:
+            if self.data.source == SRC_FILE:
+                ready = self.data.avg_file is not None
+            else:
+                ready = True
+        else:
+            ready = self.optical.is_calibrated
         self.process_btn.setEnabled(
-            self._calibrated and not self._busy and not self._monitoring
+            ready and not self._busy and not self._monitoring
         )
+
+    def _on_algorithm_changed(self, algorithm: str) -> None:
+        """Show only the sections the active algorithm uses. The averaging
+        algorithm is single-BPD with no BW segments and no live monitoring, so
+        its Segments box, the per-channel Display options, and the whole Monitor
+        row are hidden."""
+        is_avg = algorithm == ALGO_AVERAGE
+        self._section_boxes["Segments"].setVisible(not is_avg)
+        self.display.set_single_bpd(is_avg)
+        self._monitor_row_widget.setVisible(not is_avg)
+        # Rollback (a monitoring feature) is hidden under averaging; back on
+        # XCORR, restore it only if recent frames actually exist.
+        self.rollback_group.setVisible(
+            not is_avg and self.rollback_combo.count() > 0)
+        self._refresh_process_btn()
+        self._refresh_monitor_btn()
 
     def _on_monitor_clicked(self) -> None:
         if self._monitoring:
@@ -1032,7 +1345,7 @@ class SettingsPanel(QWidget):
             self.monitorStartRequested.emit()
 
     def _refresh_monitor_btn(self) -> None:
-        can_start = (self._calibrated and not self._busy
+        can_start = (self.optical.is_calibrated and not self._busy
                      and self.data.mode == MODE_ACQUIRE)
         self.monitor_btn.setEnabled(self._monitoring or can_start)
 
@@ -1042,7 +1355,7 @@ class SettingsPanel(QWidget):
         self.monitor_btn.setText(
             "■  Stop monitoring" if monitoring else "▶  Monitor (live)"
         )
-        self.data.mode_combo.setEnabled(not monitoring)
+        self.data.set_selectors_enabled(not monitoring)
         self.data.acquire_btn.setEnabled(not monitoring)
         self.save_monitor_check.setEnabled(not monitoring)
         self.export_btn.setEnabled(self._can_export and not monitoring)
@@ -1065,14 +1378,27 @@ class SettingsPanel(QWidget):
             "Acquiring…" if busy else "⏺  Acquire from scope"
         )
 
+    def set_averaging(self, busy: bool) -> None:
+        # Mark the panel busy so the Process button can't launch a second
+        # averaging run (concurrent scope acquisition) while one is in flight.
+        self._busy = busy
+        self.data.acquire_btn.setEnabled(not busy)
+        self.data.acquire_btn.setText(
+            "Averaging…" if busy else "⏺  Acquire ×N & average"
+        )
+        self._refresh_process_btn()
+        self._refresh_monitor_btn()
+
     def snapshot(self) -> SettingsSnapshot:
         rstart, rstop = self.segments.parsed_range()
         lz_min = self.analysis.parse_float(self.analysis.lorentz_fmin) or 1e6
         lz_max = self.analysis.parse_float(self.analysis.lorentz_fmax) or 1e7
         return SettingsSnapshot(
+            algorithm=self.data.algorithm,
+            source=self.data.source,
             mode=self.data.mode,
             file1=self.data.file1,
-            file2=self.data.file2,
+            avg_file=self.data.avg_file,
             scope_host=self.data.scope_host,
             scope_ch1=self.data.scope_ch1_name,
             scope_ch2=self.data.scope_ch2_name,

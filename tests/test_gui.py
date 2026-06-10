@@ -123,13 +123,16 @@ def test_calibration_uses_calculated_tau_when_available(qtbot, monkeypatch):
     assert np.isclose(win.settings.optical.delay_freq_hz, 5.0e6)
 
 
-def test_calibration_falls_back_to_configured_tau_when_no_dip(qtbot, monkeypatch):
+def test_calibration_failure_prompts_and_uses_tau_without_locking(qtbot, monkeypatch):
     from app.main_window import MainWindow
 
     win = MainWindow()
     qtbot.addWidget(win)
     monkeypatch.setattr(win, "_start_process", lambda: None)
-    win.settings.optical.tau_fallback.setValue(50.0)   # 50 ns → 20 MHz
+    prompts = []
+    monkeypatch.setattr("app.main_window.QMessageBox.information",
+                        lambda *a, **k: prompts.append(a))
+    win.settings.optical.manual_tau.setValue(50.0)     # 50 ns → 20 MHz
 
     class _Res:
         fsr_hz = None           # no dip detected
@@ -142,8 +145,93 @@ def test_calibration_falls_back_to_configured_tau_when_no_dip(qtbot, monkeypatch
         contrast = None
 
     win._on_calibrate_ok(_Res())
-    assert win.settings.optical.is_calibrated
-    assert np.isclose(win.settings.optical.delay_freq_hz, 20e6)  # configured τ
+    assert prompts                                      # user was prompted
+    assert win.settings.optical.is_calibrated           # not locked
+    assert np.isclose(win.settings.optical.delay_freq_hz, 20e6)  # τ field value
+
+
+def test_manual_override_takes_priority(qtbot):
+    from app.main_window import MainWindow
+
+    win = MainWindow()
+    qtbot.addWidget(win)
+    opt = win.settings.optical
+    opt.manual_tau.setValue(40.0)          # 40 ns → 25 MHz
+    opt.manual_check.setChecked(True)
+
+    assert opt.manual_enabled
+    assert opt.is_calibrated                # manual is always a usable FSR
+    assert np.isclose(opt.delay_freq_hz, 25e6)
+
+
+def test_manual_length_and_tau_stay_linked(qtbot):
+    from app.main_window import MainWindow
+
+    win = MainWindow()
+    qtbot.addWidget(win)
+    opt = win.settings.optical
+    n = opt.n_core.value()
+    C = 299_792_458.0
+
+    opt.manual_tau.setValue(100.0)                       # 100 ns
+    expected_len = 100.0e-9 * C / n
+    assert np.isclose(opt.manual_len.value(), expected_len, rtol=1e-4)
+
+    opt.manual_len.setValue(10.0)                        # 10 m
+    expected_tau = 10.0 * n / C * 1e9
+    # τ spinbox rounds to 0.1 ns, so allow one decimal step of slack.
+    assert np.isclose(opt.manual_tau.value(), expected_tau, atol=0.1)
+    assert opt.manual_tau.value() != 100.0               # actually changed (linked)
+
+
+def test_kick_off_autocal_uses_manual_without_calibrating(qtbot, monkeypatch):
+    from app.main_window import MainWindow
+
+    win = MainWindow()
+    qtbot.addWidget(win)
+    processed = []
+    calibrated = []
+    monkeypatch.setattr(win, "_start_process", lambda: processed.append(True))
+    monkeypatch.setattr(win, "_start_calibrate",
+                        lambda **k: calibrated.append(True))
+    win.settings.optical.manual_tau.setValue(40.0)
+    win.settings.optical.manual_check.setChecked(True)  # _data is None → no process yet
+    win._data = object()  # presence is enough; manual path doesn't read it
+
+    win._kick_off_autocal()
+
+    assert processed == [True]      # processed with the manual FSR
+    assert calibrated == []         # auto-calibration skipped
+
+
+def test_process_stays_enabled_after_manual_length_change(qtbot, monkeypatch):
+    """Regression for bug 2.2: after the data auto-processes, ticking Manual
+    FSR and editing the fiber length / τ must keep Process clickable so the
+    cached data can be re-processed with the new delay."""
+    from app.main_window import MainWindow
+
+    win = MainWindow()
+    qtbot.addWidget(win)
+    # Auto-cal succeeded earlier → Process is unlocked.
+    win.settings.optical.apply_calibrated_fsr(2e5)
+    win.settings.set_calibrated(True)
+    assert win.settings.process_btn.isEnabled() is True
+
+    # User ticks Manual FSR (goes through the real toggle handler) and dials in
+    # the 400 m fiber. Neither step should disable Process.
+    win.settings.optical.manual_check.setChecked(True)
+    assert win.settings.process_btn.isEnabled() is True
+
+    win.settings.optical.manual_len.setValue(400.0)
+    assert win.settings.process_btn.isEnabled() is True
+    # The new length actually drives the resolved FSR/τ used by Process.
+    assert win.settings.optical.delay_freq_hz < 1e6      # 400 m → ~0.5 MHz FSR
+
+    # And Process can in fact be invoked (re-processes the cached data).
+    started = []
+    monkeypatch.setattr(win, "_start_process", lambda: started.append(True))
+    win.settings.process_btn.click()
+    assert started == [True]
 
 
 def test_trend_plot_renders_points(qtbot):
@@ -171,20 +259,19 @@ def test_trend_plot_clear(qtbot):
 
 def test_monitor_button_gating(qtbot):
     from app.main_window import MainWindow
-    from app.settings_panel import MODE_ACQUIRE
+    from app.settings_panel import SRC_SCOPE
 
     win = MainWindow()
     qtbot.addWidget(win)
     sp = win.settings
 
     # Not calibrated → monitor disabled
-    sp.set_calibrated(False)
+    sp.optical.reset_calibration()
     assert sp.monitor_btn.isEnabled() is False
 
-    # Calibrated + acquire mode → monitor enabled
-    sp.data.mode_combo.setCurrentIndex(
-        sp.data.mode_combo.findData(MODE_ACQUIRE))
-    sp.set_calibrated(True)
+    # Calibrated (usable FSR) + dual-BPD scope source → monitor enabled
+    sp.data.select_source(SRC_SCOPE)          # algorithm defaults to XCORR
+    sp.optical.apply_calibrated_fsr(2e5)
     assert sp.monitor_btn.isEnabled() is True
 
     # While monitoring: label flips, Process disabled, monitor stays enabled
@@ -241,14 +328,14 @@ def _ready_to_monitor(win):
     import numpy as np
 
     from app.data_io import DualBpdData
-    from app.settings_panel import MODE_ACQUIRE
+    from app.settings_panel import SRC_SCOPE
 
     t = np.arange(64) / 1e6
     win._data = DualBpdData(t=t, v1=np.sin(t), v2=np.cos(t),
                             sample_rate=1e6, source_files=())
     win.settings.optical.apply_calibrated_fsr(2e5)
     sp = win.settings
-    sp.data.mode_combo.setCurrentIndex(sp.data.mode_combo.findData(MODE_ACQUIRE))
+    sp.data.select_source(SRC_SCOPE)          # XCORR + scope → MODE_ACQUIRE
 
 
 def test_save_checkbox_drives_save_monitor_enabled(qtbot):
@@ -404,6 +491,148 @@ def test_save_frame_raw_writes_selected_frame(qtbot, tmp_path, monkeypatch):
     np.testing.assert_allclose(load_record(out).v1, _raw_frame().v1)
 
 
+def _avg_result():
+    from app.averaging import average_records
+
+    def rec(seed):
+        rng = np.random.default_rng(seed)
+        t = np.arange(2048) / 1e6
+        return np.sin(2 * np.pi * 1e5 * t + 0.01 * np.cumsum(rng.standard_normal(2048)))
+
+    return average_records([rec(i) for i in range(3)], 1e6, 1e6, n_skip=10, fmax=4e5)
+
+
+def test_average_mode_toggles_controls(qtbot):
+    from app.main_window import MainWindow
+    from app.settings_panel import ALGO_AVERAGE, ALGO_XCORR, SRC_SCOPE
+
+    win = MainWindow()
+    qtbot.addWidget(win)
+    sp = win.settings
+    d = sp.data
+    d.select_algorithm(ALGO_AVERAGE)
+    d.select_source(SRC_SCOPE)
+    # Averaging shows its param + N groups and relabels the acquire button,
+    # while the Segments section and Monitor row are hidden.
+    assert not d._grp_avg_params.isHidden()
+    assert not d._grp_avg_scope.isHidden()
+    assert "average" in d.acquire_btn.text().lower()
+    assert sp._section_boxes["Segments"].isHidden()
+    assert sp._monitor_row_widget.isHidden()
+
+    d.select_algorithm(ALGO_XCORR)
+    assert d._grp_avg_params.isHidden()
+    assert not sp._section_boxes["Segments"].isHidden()
+    assert not sp._monitor_row_widget.isHidden()
+
+
+def test_start_average_without_manual_fsr_spawns_worker_with_none_fsr(qtbot, monkeypatch):
+    """Without a manual FSR, _start_average passes fsr=None to let the worker
+    auto-calibrate from the first acquired record (Task 2.1)."""
+    from app.main_window import MainWindow
+    from app.settings_panel import ALGO_AVERAGE, SRC_SCOPE
+
+    win = MainWindow()
+    qtbot.addWidget(win)
+    sp = win.settings
+    sp.data.select_algorithm(ALGO_AVERAGE)
+    sp.data.select_source(SRC_SCOPE)
+    sp.data.scope_ip.setText("1.2.3.4")           # has host, no manual FSR
+    captured = {}
+
+    class _FakeAvgWorker:
+        def __init__(self, host, ch1, n, fsr, skip, fmax,
+                     with_convergence=False, n_core=1.468, **kw):
+            captured.update(fsr=fsr)
+            self.progress = _FakeSignal()
+            self.finished_ok = _FakeSignal()
+            self.finished_err = _FakeSignal()
+            self.finished = _FakeSignal()
+
+        def start(self):
+            pass
+
+        def deleteLater(self):
+            pass
+
+    monkeypatch.setattr("app.main_window.AverageAcquireWorker", _FakeAvgWorker)
+    win._start_average()
+
+    assert captured["fsr"] is None                # auto-cal path: None passed through
+    assert win._avg_worker is not None
+
+
+def test_start_average_spawns_worker_with_resolved_fsr(qtbot, monkeypatch):
+    from app.main_window import MainWindow
+    from app.settings_panel import ALGO_AVERAGE, SRC_SCOPE
+
+    win = MainWindow()
+    qtbot.addWidget(win)
+    sp = win.settings
+    sp.data.select_algorithm(ALGO_AVERAGE)
+    sp.data.select_source(SRC_SCOPE)
+    sp.data.scope_ip.setText("1.2.3.4")
+    sp.optical.manual_tau.setValue(100.0)          # 100 ns → 10 MHz
+    sp.optical.manual_check.setChecked(True)
+    captured = {}
+
+    class _FakeAvgWorker:
+        def __init__(self, host, ch1, n, fsr, skip, fmax,
+                     with_convergence=False, n_core=1.468, **kw):
+            captured.update(host=host, n=n, fsr=fsr, skip=skip)
+            self.progress = _FakeSignal()
+            self.finished_ok = _FakeSignal()
+            self.finished_err = _FakeSignal()
+            self.finished = _FakeSignal()
+
+        def start(self):
+            pass
+
+        def deleteLater(self):
+            pass
+
+    monkeypatch.setattr("app.main_window.AverageAcquireWorker", _FakeAvgWorker)
+    win._start_average()
+
+    assert captured["host"] == "1.2.3.4"
+    assert captured["n"] == 10                     # default average count
+    assert np.isclose(captured["fsr"], 1e7)        # manual τ=100ns → 10 MHz
+
+
+def test_average_ok_renders_and_enables_save(qtbot):
+    from app.main_window import MainWindow
+
+    win = MainWindow()
+    qtbot.addWidget(win)
+    res = _avg_result()
+    win._on_average_ok((res, []))
+
+    assert win._avg_result is res
+    assert win.settings.data.save_averaged_btn.isEnabled()
+
+
+def test_save_averaged_spectrum_npz(qtbot, tmp_path, monkeypatch):
+    from app.main_window import MainWindow
+
+    win = MainWindow()
+    qtbot.addWidget(win)
+    win._avg_result = _avg_result()
+    out = tmp_path / "avg"  # no extension → .npz appended from the filter
+
+    class _Dialog:
+        @staticmethod
+        def getSaveFileName(*a, **k):
+            return (str(out), "NumPy archive (*.npz)")
+
+    monkeypatch.setattr("app.main_window.QFileDialog", _Dialog)
+    win._save_averaged_spectrum()
+
+    saved = tmp_path / "avg.npz"
+    assert saved.exists()
+    with np.load(saved) as d:
+        np.testing.assert_allclose(d["S_nu_Hz2_per_Hz"], win._avg_result.s_nu)
+
+
 def test_save_frame_spectrum_writes_npz(qtbot, tmp_path, monkeypatch):
     from app.main_window import MainWindow
     from app.monitor_io import load_spectrum_result
@@ -528,3 +757,103 @@ def test_monitor_clear_forces_fresh_start(qtbot, tmp_path, monkeypatch):
 
     win._start_monitor()                      # fresh again → prompts a second time
     assert len(prompts) == 2
+
+
+def test_avg_file_process_routes_to_file_averaging(qtbot, tmp_path):
+    """In (averaging, file) mode, Process is gated on a selected file and routes
+    to the file-averaging worker rather than CoshXcorr."""
+    from pathlib import Path
+
+    from app.data_io import save_records
+    from app.main_window import MainWindow
+    from app.settings_panel import ALGO_AVERAGE, SRC_FILE
+
+    win = MainWindow()
+    qtbot.addWidget(win)
+    d = win.settings.data
+    d.select_algorithm(ALGO_AVERAGE)
+    d.select_source(SRC_FILE)
+
+    # No file yet → Process disabled.
+    assert win.settings.process_btn.isEnabled() is False
+
+    recs = np.random.default_rng(0).standard_normal((3, 256))
+    path = tmp_path / "m.npz"
+    save_records(path, recs, 1e6)
+    d._set_avg_file(Path(path))
+    d.fileChanged.emit()
+    assert win.settings.process_btn.isEnabled() is True
+
+    routed = {}
+    win._start_average_from_file = lambda: routed.setdefault("file", True)
+    win._start_average = lambda: routed.setdefault("scope", True)
+    win._start_process()
+    assert routed == {"file": True}
+
+
+def test_keep_raw_average_enables_raw_save(qtbot):
+    """After a keep-raw average produces records, 'Save raw records' is enabled;
+    a file average (no retained records) leaves it disabled."""
+    from app.main_window import MainWindow
+    from app.settings_panel import ALGO_AVERAGE, SRC_SCOPE
+
+    win = MainWindow()
+    qtbot.addWidget(win)
+    d = win.settings.data
+    d.select_algorithm(ALGO_AVERAGE)
+    d.select_source(SRC_SCOPE)
+    win.plot.render_averaged = lambda *a, **k: None
+
+    class _Result:
+        n_avg = 2
+        linewidth_hz = float("nan")
+        fsr_hz = 5e5
+
+    # keep-raw worker → records retained → save enabled
+    win._avg_worker = type("W", (), {"raw_records": [np.zeros(8), np.zeros(8)],
+                                      "sample_rate_hz": 1e6})()
+    win._on_average_ok((_Result(), []))
+    assert d.save_raw_btn.isEnabled() is True
+
+    # file/plain worker → no records → save disabled
+    win._avg_worker = type("W", (), {})()
+    win._on_average_ok((_Result(), []))
+    assert d.save_raw_btn.isEnabled() is False
+
+
+def test_scope_averaging_locks_process_button(qtbot):
+    """A scope averaging run marks the panel busy so Process can't launch a
+    second concurrent acquisition (regression: set_averaging must set _busy)."""
+    from app.main_window import MainWindow
+    from app.settings_panel import ALGO_AVERAGE, SRC_SCOPE
+
+    win = MainWindow()
+    qtbot.addWidget(win)
+    sp = win.settings
+    sp.data.select_algorithm(ALGO_AVERAGE)
+    sp.data.select_source(SRC_SCOPE)
+    assert sp.process_btn.isEnabled() is True       # ready before run
+
+    sp.set_averaging(True)
+    assert sp.process_btn.isEnabled() is False       # locked during the run
+    sp.set_averaging(False)
+    assert sp.process_btn.isEnabled() is True         # unlocked afterwards
+
+
+def test_rollback_group_restored_when_returning_to_xcorr(qtbot):
+    """Switching to averaging hides the monitoring rollback group; returning to
+    XCORR restores it when recent frames still exist."""
+    from app.main_window import MainWindow
+    from app.settings_panel import ALGO_AVERAGE, ALGO_XCORR
+
+    win = MainWindow()
+    qtbot.addWidget(win)
+    sp = win.settings
+    sp.set_rollback_available(2)                       # frames exist → shown
+    assert sp.rollback_group.isHidden() is False
+
+    sp.data.select_algorithm(ALGO_AVERAGE)
+    assert sp.rollback_group.isHidden() is True        # hidden under averaging
+
+    sp.data.select_algorithm(ALGO_XCORR)
+    assert sp.rollback_group.isHidden() is False       # restored (frames remain)

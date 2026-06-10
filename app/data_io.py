@@ -193,6 +193,45 @@ def save_record(path: str | Path, data: "DualBpdData") -> None:
                          f"of {', '.join(DATA_SUFFIXES)})")
 
 
+# ---------- multi-record averaging files ----------
+# The averaging algorithm (single-BPD Hann) can save the N raw records it
+# acquired into ONE .npz so they can be re-loaded and re-averaged offline.
+# Layout: a 2-D ``records`` array of shape (N, n_samples) plus a scalar
+# ``sample_rate``. Each row is one single-channel beat trace.
+
+def save_records(
+    path: str | Path,
+    records: np.ndarray,
+    sample_rate: float,
+) -> None:
+    """Persist ``N`` single-BPD raw records as one ``.npz`` (``records`` of
+    shape ``(N, n_samples)`` + scalar ``sample_rate``). Round-trips via
+    :func:`load_records`."""
+    path = Path(path)
+    if path.suffix.lower() != ".npz":
+        raise ValueError(f"Multi-record files use .npz (got '{path.name}')")
+    arr = np.asarray(records, dtype=np.float64)
+    if arr.ndim != 2 or arr.shape[0] < 1:
+        raise ValueError("records must be a 2-D (N, n_samples) array")
+    np.savez(path, records=arr, sample_rate=float(sample_rate))
+
+
+def load_records(path: str | Path) -> tuple[np.ndarray, float]:
+    """Load a multi-record ``.npz`` → ``(records (N, n_samples) float64,
+    sample_rate)``. Mirror of :func:`save_records`."""
+    path = Path(path)
+    with np.load(path) as npz:
+        if "records" not in npz.files or "sample_rate" not in npz.files:
+            raise ValueError(
+                f"{path.name} is not a multi-record file "
+                f"(expected 'records' and 'sample_rate' arrays)")
+        records = np.asarray(npz["records"], dtype=np.float64)
+        sample_rate = float(npz["sample_rate"])
+    if records.ndim != 2 or records.shape[0] < 1:
+        raise ValueError(f"{path.name}: 'records' must be 2-D (N, n_samples)")
+    return records, sample_rate
+
+
 def export_spectrum(
     path: Path,
     freq: np.ndarray,

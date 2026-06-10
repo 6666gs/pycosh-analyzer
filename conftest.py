@@ -12,6 +12,21 @@ from dataclasses import dataclass
 
 import numpy as np
 
+# Headless smoke tests assert on axis model state (titles, line counts), never
+# rendered pixels, so they never need a real repaint. matplotlib's Qt canvas
+# schedules repaints lazily via ``draw_idle`` (a ``QTimer.singleShot`` →
+# ``_draw_idle``); when qtbot tears a GUI test down and the canvas is later
+# GC'd, that deferred draw can fire on a now-deleted C++ object during a *later*
+# test's event processing and raise "Internal C++ object already deleted".
+# Neutralising the deferred draw for the test session removes the leak entirely
+# (a full synchronous ``draw()`` is still available where a test needs one).
+try:  # pragma: no cover - guarded import for non-Qt environments
+    from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
+
+    FigureCanvasQTAgg.draw_idle = lambda self: None
+except Exception:  # noqa: BLE001
+    pass
+
 
 def synthetic_beat(n: int = 4096, sr: float = 1e6, fbeat: float = 1e5, seed: int = 0):
     """A valid heterodyne beat: carrier + tiny random-walk phase noise.

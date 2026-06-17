@@ -7,15 +7,20 @@ from pathlib import Path
 import numpy as np
 from PySide6.QtCore import QObject, QThread, Signal
 
-# Lookup order: already-on-sys.path → vendor/ → optional external override
+# Lookup order: already importable (pip-installed sds7404) → optional dev override
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-VENDOR_SDS7404_PARENT = _REPO_ROOT / "vendor"
 EXTERNAL_SDS7404_PARENT_ENV = "DBPD_SDS7404_PARENT"
 
 
 def ensure_sds7404_importable() -> None:
-    """Make `sds7404` importable. Prefers the vendored driver under vendor/;
-    falls back to $DBPD_SDS7404_PARENT if set."""
+    """Make `sds7404` importable.
+
+    The driver normally comes from pip (``sds7404 @ git+…`` in
+    requirements.txt), so the first import just succeeds. For local
+    development without reinstalling, point ``$DBPD_SDS7404_PARENT`` at a
+    folder containing the driver — either the flat repo (holds ``sds7404.py``)
+    or a parent of an ``sds7404/`` package — to override the installed copy.
+    """
     try:
         import sds7404  # noqa: F401
         return
@@ -23,17 +28,11 @@ def ensure_sds7404_importable() -> None:
         pass
 
     import os
-    candidates: list[Path] = []
-    if VENDOR_SDS7404_PARENT.exists():
-        candidates.append(VENDOR_SDS7404_PARENT)
     override = os.environ.get(EXTERNAL_SDS7404_PARENT_ENV)
     if override:
-        candidates.append(Path(override))
-
-    for parent in candidates:
-        if (parent / "sds7404").exists():
+        parent = Path(override)
+        if (parent / "sds7404.py").exists() or (parent / "sds7404").exists():
             sys.path.insert(0, str(parent))
-            return
 
 
 class AcquireWorker(QThread):

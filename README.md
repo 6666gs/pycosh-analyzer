@@ -66,11 +66,17 @@ dbpd_analyzer/
 │   ├── plot_widget.py       matplotlib FigureCanvas + 分析叠加层
 │   ├── settings_panel.py    侧栏：data（算法×数据源）/ optical / segments / display / analysis
 │   └── main_window.py       连接侧栏 ↔ 绘图 ↔ Worker 各信号
-├── vendor/                  vendored 第三方依赖
-│   ├── pycosh/              MIT, Maodong Gao 2022 —— COSH 参考实现
-│   └── sds7404/             Siglent SDS7404A LAN 驱动（pyvisa）
+├── scripts/                 独立分析/调试脚本（非 GUI）
+│   ├── measure_delay.py     延迟线 FSR / τ 测量
+│   ├── process_sin_noise.py 双 BPD 实测数据 → pycosh 噪声谱
+│   └── verify_pycosh.py     pycosh 数值自检（白频噪声）
+├── vendor/                  外部依赖
+│   └── pycosh/              MIT, Maodong Gao 2022 —— COSH 参考实现（vendored）
 └── examples/                示例数据 + 说明
 ```
+
+> SDS7404A 驱动**不在本仓库内**：它独立成库,经 `requirements.txt` 用 pip 从 git
+> 拉取（见下方安装）。
 
 ---
 
@@ -83,20 +89,27 @@ python -m venv .venv
 .venv/bin/pip install -r requirements.txt
 ```
 
-`pycosh` 和 `sds7404` 驱动已 vendor 在 `vendor/` 下，无需额外路径配置。应用在导入时会把
-`vendor/` 加入 `sys.path`。示波器连接走 **pyvisa-py**（纯 Python，随 requirements 安装），
-无需系统 NI-VISA。
+**开箱即用,无需额外步骤。** `pycosh` 直接 vendor 在 `vendor/pycosh/`；`sds7404` 驱动
+则由 `requirements.txt` 里的一行
+
+```text
+sds7404 @ git+https://github.com/6666gs/sds7404.git
+```
+
+在 `pip install` 时自动从 git 拉取并装进虚拟环境（连「Download ZIP」下载本项目也照样
+能装）。需要锁版本时在该 URL 末尾加 `@<tag 或 commit>`。示波器连接走 **pyvisa-py**（纯
+Python，随 requirements 安装），无需系统 NI-VISA。
 
 ### 高级用户覆盖
 
-指向某个外部开发分支（比如跟踪上游 pycosh）：
+本地改驱动/上游库,不想每次重装时,指向你的开发目录：
 
 ```bash
-export DBPD_PYCOSH_PARENT=/path/to/folder-containing-pycosh
-export DBPD_SDS7404_PARENT=/path/to/folder-containing-sds7404
+export DBPD_PYCOSH_PARENT=/path/to/folder-containing-pycosh   # 含 pycosh/ 包的目录
+export DBPD_SDS7404_PARENT=/path/to/sds7404                   # 含 sds7404.py 的仓库目录
 ```
 
-覆盖只在 `vendor/` 内拷贝导入失败后才生效，所以全新克隆开箱即用。
+覆盖只在正常 `import` 失败后才生效,所以默认安装下开箱即用。
 
 ## 运行
 
@@ -247,6 +260,6 @@ sample_rate ≥ 2.5 · f_c        (推荐, 给抗混叠滤波留余量)
 
 MIT —— 见 [LICENSE](LICENSE)。
 
-vendor 内第三方组件保留各自协议：
+第三方组件保留各自协议：
 - `vendor/pycosh/`  MIT, Copyright (c) 2022 Maodong Gao
-- `vendor/sds7404/`  MIT（本项目）
+- `sds7404` 驱动（pip 从 git 安装）  MIT,本项目 —— <https://github.com/6666gs/sds7404>

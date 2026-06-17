@@ -4,7 +4,12 @@ numpy>=1.24
 pandas>=2.0
 scipy>=1.10
 
-# Oscilloscope acquisition (optional — only needed for live acquire mode)
+# Oscilloscope acquisition (optional — only needed for live acquire mode).
+# The SDS7404A driver lives in its own repo and is pulled straight from git,
+# so a plain `pip install -r requirements.txt` (or even a ZIP download of this
+# project) gets it — no git submodule dance. Pin a tag/commit by appending
+# e.g. `@v0.1.0` to the URL if you need reproducibility.
+sds7404 @ git+https://github.com/6666gs/sds7404.git
 pyvisa>=1.13
 pyvisa-py>=0.7
 psutil>=5.9

@@ -1,7 +1,17 @@
 # vendor/
 
-Vendored third-party dependencies. Bundled here so `dbpd_analyzer` is
-self-contained — no submodules, no external path hacks.
+Third-party code bundled directly into the repo. Right now that's just:
+
+- `pycosh/` — vendored as-is (reference implementation, no local changes)
+
+The app prepends `vendor/` to `sys.path` at import time, so `import pycosh`
+resolves to the copy here.
+
+> The **SDS7404A driver is no longer vendored here.** It lives in its own repo
+> and is pulled in via pip (`sds7404 @ git+https://github.com/6666gs/sds7404.git`
+> in `requirements.txt`), so `import sds7404` resolves to the installed package.
+> For local driver development without reinstalling, point
+> `$DBPD_SDS7404_PARENT` at the folder holding `sds7404.py`.
 
 ## `vendor/pycosh/`
 
@@ -15,20 +25,3 @@ from Yuan, Wang, Liu, et al. *Opt. Express* **30**, 25147 (2022).
 
 If upstream releases a meaningful update, replace these files and bump the
 provenance note here.
-
-## `vendor/sds7404/`
-
-Minimal pyvisa-based driver for the Siglent SDS7404A H12 oscilloscope
-(12-bit, 4 GHz, 20 GSa/s, 4 channels), reading multichannel waveforms over
-LAN. Author: this project (wux_mac).
-
-- **License**: MIT (root `LICENSE` applies)
-- **Public surface**: `SDS7404` context-managed handle returning a
-  `MultiChannelFrame` from `read_channels(...)`
-- Tested against the SDS7404A H12 firmware shipped Q4-2024 / Q1-2025; the
-  binary `:WAVeform:PREamble?` layout follows the SDS HD-generation 346-byte
-  preamble (same as SDS6000A / SDS800XHD)
-
-For other Siglent SDS HD-generation scopes, this driver should work
-unchanged. For other vendors, replace this directory with an equivalent
-driver exposing `read_channels(channels) -> object_with_voltages_dict_and_time_axis`.

@@ -74,11 +74,17 @@ dbpd_analyzer/
 │   ├── plot_widget.py       matplotlib FigureCanvas + analysis overlays
 │   ├── settings_panel.py    Sidebar: data (algorithm × source) / optical / segments / display / analysis
 │   └── main_window.py       Wires sidebar ↔ plot ↔ workers
+├── scripts/                 Standalone analysis/debug scripts (non-GUI)
+│   ├── measure_delay.py     Delay-line FSR / τ measurement
+│   ├── process_sin_noise.py Dual-BPD measured data → pycosh noise spectrum
+│   └── verify_pycosh.py     Numerical self-check of pycosh (white freq noise)
 ├── vendor/
-│   ├── pycosh/              MIT, Maodong Gao 2022 — COSH reference implementation
-│   └── sds7404/             Siglent SDS7404A LAN driver (pyvisa)
+│   └── pycosh/              MIT, Maodong Gao 2022 — COSH reference impl (vendored)
 └── examples/                sample data + notes
 ```
+
+> The SDS7404A driver is **not** in this repo — it's a standalone package
+> pulled in via pip from git (see Setup below).
 
 ---
 
@@ -91,19 +97,28 @@ python -m venv .venv
 .venv/bin/pip install -r requirements.txt
 ```
 
-`pycosh` and the `sds7404` driver are bundled under `vendor/`; the app adds
-`vendor/` to `sys.path` at import time. Scope connection uses **pyvisa-py**
-(pure Python, installed via requirements) — no system NI-VISA required.
+**Works out of the box, no extra steps.** `pycosh` is vendored under
+`vendor/pycosh/`; the `sds7404` driver is pulled from git by one line in
+`requirements.txt`:
+
+```text
+sds7404 @ git+https://github.com/6666gs/sds7404.git
+```
+
+so `pip install` fetches it into the venv (even a "Download ZIP" of this
+project installs fine). Append `@<tag-or-commit>` to that URL to pin a
+version. Scope connection uses **pyvisa-py** (pure Python, installed via
+requirements) — no system NI-VISA required.
 
 ### Power-user overrides
 
 ```bash
-export DBPD_PYCOSH_PARENT=/path/to/folder-containing-pycosh
-export DBPD_SDS7404_PARENT=/path/to/folder-containing-sds7404
+export DBPD_PYCOSH_PARENT=/path/to/folder-containing-pycosh   # dir containing the pycosh/ package
+export DBPD_SDS7404_PARENT=/path/to/sds7404                   # the driver repo dir (holds sds7404.py)
 ```
 
-The override only takes effect after the bundled `vendor/` copy fails to
-import, so a clean clone always works out of the box.
+An override only takes effect after the normal `import` fails, so a default
+install always works out of the box.
 
 ## Run
 
@@ -274,6 +289,6 @@ Three non-obvious points:
 
 MIT — see [LICENSE](LICENSE).
 
-Bundled vendored components keep their own licensing:
+Third-party components keep their own licensing:
 - `vendor/pycosh/`  MIT, Copyright (c) 2022 Maodong Gao
-- `vendor/sds7404/`  MIT (this project)
+- `sds7404` driver (pip-installed from git)  MIT, this project — <https://github.com/6666gs/sds7404>
